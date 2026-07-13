@@ -1,0 +1,40 @@
+[package]
+name = "hk-proton-desktop"
+version = "0.1.0"
+description = "slpyW2W Windows desktop shell"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "hk_proton_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "hk-proton-desktop"
+path = "src/main.rs"
+test = false
+bench = false
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+hk-proton-core = { path = "../../../crates/hk-proton-core" }
+hk-proton-manager = { path = "../../../crates/hk-proton-manager" }
+ipnet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+sha2.workspace = true
+tauri = { version = "=2.11.5", features = ["tray-icon"] }
+tauri-plugin-dialog = "=2.7.1"
+tauri-plugin-single-instance = "=2.4.2"
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"

@@ -1,0 +1,38 @@
+[package]
+name = "hk-proton-manager"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "slpyW2W 的事务状态、Mihomo 进程与 Windows 冲突管理"
+
+[dependencies]
+base64.workspace = true
+fs2 = "0.4"
+getrandom = "0.4"
+hmac = "0.12"
+hk-proton-core = { path = "../hk-proton-core" }
+ipnet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

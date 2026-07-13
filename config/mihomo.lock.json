@@ -1,0 +1,8 @@
+{
+  "version": "1.19.28",
+  "tag": "v1.19.28",
+  "asset": "mihomo-windows-amd64-compatible-v1.19.28.zip",
+  "sha256": "6d8a079d01b3631e73e56b7b42a067afc14f9e3ad99f2880d38bb141cf8fcbe7",
+  "source": "https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.28",
+  "license": "GPL-3.0"
+}
