@@ -28,6 +28,9 @@ use crate::{
     scanner::{SourceRole, scan_selected_files},
 };
 
+#[cfg(feature = "pyxis")]
+use crate::scanner::scan_embedded_pyxis_profiles;
+
 #[cfg(test)]
 use crate::scanner::scan_config_tree;
 
@@ -59,6 +62,8 @@ impl AppService<DpapiCurrentUserProtector, crate::live_runtime::LiveRuntime> {
             store,
             runtime,
         };
+        #[cfg(feature = "pyxis")]
+        service.bootstrap_pyxis_profiles()?;
         service.refresh_runtime_contract_if_needed()?;
         Ok(service)
     }
@@ -77,6 +82,33 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
     pub fn get_app_status(&mut self) -> ServiceResult<AppStatusDto> {
         let runtime = self.runtime.poll();
         self.status_with_runtime(runtime)
+    }
+
+    /// pyxis 独立数据目录首次启动时，将 EXE 内置配置导入当前用户 DPAPI Vault。
+    /// 已有 generation 时绝不覆盖用户现有选择或状态。
+    #[cfg(feature = "pyxis")]
+    fn bootstrap_pyxis_profiles(&mut self) -> ServiceResult<()> {
+        if self.store.load_current()?.is_some() {
+            return Ok(());
+        }
+        let sources = scan_embedded_pyxis_profiles()?;
+        let mut imports = Vec::with_capacity(sources.len());
+        for source in sources {
+            let parsed = parse_wireguard(source.contents.as_str())
+                .map_err(|_| ServiceError::InvalidWireGuard)?;
+            imports.push(ParsedImport {
+                role: source.role,
+                id: source.id,
+                display_name: source.display_name,
+                config: parsed.config,
+                source_sha256: parsed.source_sha256,
+            });
+        }
+        let (state, pending) = merge_imports(None, imports, OffsetDateTime::now_utc())?;
+        let candidate = self.build_candidate(state, pending)?;
+        self.store.commit(candidate, None)?;
+        let _ = self.runtime.configuration_changed();
+        Ok(())
     }
 
     /// 端口或运行合同升级时自动生成新 revision，避免旧 generation 继续占用 Clash 端口。

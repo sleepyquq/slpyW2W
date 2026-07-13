@@ -29,11 +29,69 @@ pub enum SourceRole {
     Proton,
 }
 
+#[cfg(feature = "pyxis")]
+struct EmbeddedPyxisProfile {
+    role: SourceRole,
+    display_name: &'static str,
+    contents: &'static [u8],
+}
+
+#[cfg(feature = "pyxis")]
+include!(concat!(env!("OUT_DIR"), "/pyxis_profiles.rs"));
+
 pub struct ScannedSource {
     pub role: SourceRole,
     pub id: String,
     pub display_name: String,
     pub contents: Zeroizing<String>,
+}
+
+/// 读取编译进 pyxis EXE 的九份配置。这里只把静态字节复制进 Zeroizing 缓冲区，
+/// 后续仍走与手动导入相同的严格解析、候选验证和原子提交链路。
+#[cfg(feature = "pyxis")]
+pub fn scan_embedded_pyxis_profiles() -> ServiceResult<Vec<ScannedSource>> {
+    if EMBEDDED_PYXIS_PROFILES.len() != 9 {
+        return Err(ServiceError::SourceLimitExceeded);
+    }
+    let mut first_hop_count = 0_usize;
+    let mut ids = BTreeSet::new();
+    let mut scanned = Vec::with_capacity(EMBEDDED_PYXIS_PROFILES.len());
+    for profile in EMBEDDED_PYXIS_PROFILES {
+        let source =
+            std::str::from_utf8(profile.contents).map_err(|_| ServiceError::InvalidWireGuard)?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"slpyW2W-pyxis\0embedded-profile-v1\0");
+        hasher.update(match profile.role {
+            SourceRole::FirstHop => {
+                first_hop_count += 1;
+                b"first-hop\0".as_slice()
+            }
+            SourceRole::Proton => b"proton\0".as_slice(),
+        });
+        hasher.update(profile.contents);
+        let digest = hasher.finalize();
+        let suffix = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let id = match profile.role {
+            SourceRole::FirstHop => format!("first-hop-{suffix}"),
+            SourceRole::Proton => format!("proton-{suffix}"),
+        };
+        if !ids.insert(id.clone()) {
+            return Err(ServiceError::InvalidWireGuard);
+        }
+        scanned.push(ScannedSource {
+            role: profile.role,
+            id,
+            display_name: profile.display_name.to_owned(),
+            contents: Zeroizing::new(source.to_owned()),
+        });
+    }
+    if first_hop_count != 1 {
+        return Err(ServiceError::MissingFirstHop);
+    }
+    Ok(scanned)
 }
 
 /// 读取用户在原生文件选择器中明确选中的配置文件。

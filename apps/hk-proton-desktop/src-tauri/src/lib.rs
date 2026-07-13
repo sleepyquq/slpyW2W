@@ -8,6 +8,11 @@ mod runtime;
 mod scanner;
 mod service;
 
+#[cfg(feature = "pyxis")]
+const PRODUCT_NAME: &str = "slpyW2W - pyxis";
+#[cfg(not(feature = "pyxis"))]
+const PRODUCT_NAME: &str = "slpyW2W";
+
 #[cfg(windows)]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,31 +32,35 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let app_data_root = app
-                .path()
-                .app_local_data_dir()
-                .map_err(|_| std::io::Error::other("无法定位 slpyW2W 本地状态目录"))?;
+            let app_data_root = app.path().app_local_data_dir().map_err(|_| {
+                std::io::Error::other(format!("无法定位 {PRODUCT_NAME} 本地状态目录"))
+            })?;
             let state_root = app_data_root.join("state-vault");
             // GUI 在 release 下已提升权限；进入服务层前先封住用户可写路径中的 junction。
             let state_directory = WindowsPrivateDirectory::create(&app_data_root, &state_root)
-                .map_err(|_| std::io::Error::other("slpyW2W 本地状态目录不安全"))?;
+                .map_err(|_| std::io::Error::other(format!("{PRODUCT_NAME} 本地状态目录不安全")))?;
             // 产品版只接受用户在文件选择器中明确选择的配置；不读取旧工具目录。
-            let service = service::DesktopService::open(state_directory)
-                .map_err(|_| std::io::Error::other("无法初始化 slpyW2W 加密状态"))?;
+            let service = service::DesktopService::open(state_directory).map_err(|_| {
+                std::io::Error::other(format!("无法初始化 {PRODUCT_NAME} 加密状态"))
+            })?;
             app.manage(Arc::new(Mutex::new(service)));
 
-            let show_item = MenuItem::with_id(app, "show", "显示 slpyW2W", true, None::<&str>)?;
+            let show_item = MenuItem::with_id(
+                app,
+                "show",
+                format!("显示 {PRODUCT_NAME}"),
+                true,
+                None::<&str>,
+            )?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
             TrayIconBuilder::new()
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .tooltip("slpyW2W")
-                .icon(
-                    app.default_window_icon()
-                        .cloned()
-                        .ok_or_else(|| std::io::Error::other("slpyW2W 托盘图标不可用"))?,
-                )
+                .tooltip(PRODUCT_NAME)
+                .icon(app.default_window_icon().cloned().ok_or_else(|| {
+                    std::io::Error::other(format!("{PRODUCT_NAME} 托盘图标不可用"))
+                })?)
                 .on_menu_event(move |handle, event| match event.id().as_ref() {
                     "show" => show_main_window(handle),
                     "quit" => handle.exit(0),

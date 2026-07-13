@@ -9,6 +9,7 @@ import { useAppController } from "./useAppController.js";
 
 const CONNECTED_STATES = new Set(["connected", "running", "manual-verification-required"]);
 const BUSY_STATES = new Set(["starting", "connecting", "stopping", "disconnecting"]);
+const PYXIS_BUILD = import.meta.env.VITE_PYXIS_BUILD === "true";
 
 function selectedName(profiles, selectedId, fallback = "未导入") {
   return profiles.find((profile) => profile.id === selectedId)?.name ?? fallback;
@@ -309,16 +310,18 @@ function ConfigRow(props) {
         selectionDisabled={props.disabled}
         onSelect={props.onSelect}
       />
-      <NodeActions
-        label={props.label}
-        role={props.role}
-        value={props.value}
-        name={selectedName(props.profiles, props.value)}
-        menuDisabled={props.browseDisabled}
-        actionDisabled={props.disabled}
-        onImport={props.onImport}
-        onDelete={props.onDelete}
-      />
+      {!PYXIS_BUILD ? (
+        <NodeActions
+          label={props.label}
+          role={props.role}
+          value={props.value}
+          name={selectedName(props.profiles, props.value)}
+          menuDisabled={props.browseDisabled}
+          actionDisabled={props.disabled}
+          onImport={props.onImport}
+          onDelete={props.onDelete}
+        />
+      ) : null}
     </div>
   );
 }
