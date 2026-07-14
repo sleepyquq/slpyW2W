@@ -94,7 +94,7 @@ function ConnectionControl({ view, disabled, onConnect, onDisconnect }) {
   );
 }
 
-function ModeBar({ mode, disabled, hasExitNode, testing, onRequestMode, onTest }) {
+function ModeBar({ mode, disabled, canEnterForward, testing, onRequestMode, onTest }) {
   return (
     <div className="mode-bar">
       <div className={`mode-switch${mode === "double" ? " is-double" : ""}`} aria-label="连接模式">
@@ -110,7 +110,7 @@ function ModeBar({ mode, disabled, hasExitNode, testing, onRequestMode, onTest }
         <button
           className={mode === "double" ? "is-selected" : ""}
           type="button"
-          disabled={disabled || !hasExitNode}
+          disabled={disabled || !canEnterForward}
           aria-pressed={mode === "double"}
           onClick={() => onRequestMode("double")}
         >
@@ -374,10 +374,19 @@ export function App() {
     if (target) await controller.deleteProfile(target.role, target.id);
   };
 
+  const applyModeChange = async (mode) => {
+    if (mode === "double" && controller.status.protonNodes.length === 0) {
+      // 后端不会保存缺少出口节点的转发状态；先完成导入，再原子切换模式。
+      if (view.connected && !(await controller.disconnect())) return false;
+      if (!(await controller.importConfigs("proton"))) return false;
+    }
+    return controller.switchMode(mode);
+  };
+
   const confirmModeChange = async () => {
     const mode = requestedMode;
     setRequestedMode(null);
-    if (mode) await controller.switchMode(mode);
+    if (mode) await applyModeChange(mode);
   };
 
   const requestMode = (mode) => {
@@ -386,7 +395,7 @@ export function App() {
       setRequestedMode(mode);
       return;
     }
-    void controller.switchMode(mode);
+    void applyModeChange(mode);
   };
 
   return (
@@ -401,7 +410,7 @@ export function App() {
       <ModeBar
         mode={controller.status.mode}
         disabled={generalControlsDisabled}
-        hasExitNode={controller.status.protonNodes.length > 0}
+        canEnterForward={controller.status.firstHops.length > 0}
         testing={controller.testingDelays}
         onRequestMode={requestMode}
         onTest={controller.testDelays}
