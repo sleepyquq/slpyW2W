@@ -62,8 +62,6 @@ impl AppService<DpapiCurrentUserProtector, crate::live_runtime::LiveRuntime> {
             store,
             runtime,
         };
-        #[cfg(feature = "pyxis")]
-        service.bootstrap_pyxis_profiles()?;
         service.refresh_runtime_contract_if_needed()?;
         Ok(service)
     }
@@ -84,14 +82,15 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
         self.status_with_runtime(runtime)
     }
 
-    /// pyxis 独立数据目录首次启动时，将 EXE 内置配置导入当前用户 DPAPI Vault。
-    /// 已有 generation 时绝不覆盖用户现有选择或状态。
+    /// 用户首次输入团队名字后，只把该成员可用的内置配置写入当前用户 DPAPI Vault。
+    /// 相同成员再次启动时保持已有选择；切换成员时以一次候选验证和原子提交替换资源集合。
     #[cfg(feature = "pyxis")]
-    fn bootstrap_pyxis_profiles(&mut self) -> ServiceResult<()> {
-        if self.store.load_current()?.is_some() {
-            return Ok(());
+    pub fn activate_pyxis_member(&mut self, member: String) -> ServiceResult<AppStatusDto> {
+        if self.runtime.is_active() {
+            return Err(ServiceError::RuntimeActive);
         }
-        let sources = scan_embedded_pyxis_profiles()?;
+        let member = member.trim().to_ascii_lowercase();
+        let sources = scan_embedded_pyxis_profiles(&member)?;
         let mut imports = Vec::with_capacity(sources.len());
         for source in sources {
             let parsed = parse_wireguard(source.contents.as_str())
@@ -104,11 +103,23 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
                 source_sha256: parsed.source_sha256,
             });
         }
-        let (state, pending) = merge_imports(None, imports, OffsetDateTime::now_utc())?;
+
+        let current = self.store.load_current()?;
+        if current
+            .as_ref()
+            .is_some_and(|generation| state_matches_embedded(&generation.state, &imports))
+        {
+            return self.get_app_status();
+        }
+
+        let expected_revision = current.as_ref().map(|generation| generation.state.revision);
+        let (mut state, pending) = merge_imports(None, imports, OffsetDateTime::now_utc())?;
+        // 团队版首次进入默认选中“香港”；选择其他节点时再由前端原子切换到双跳。
+        state.mode = OperatingMode::SingleHop;
         let candidate = self.build_candidate(state, pending)?;
-        self.store.commit(candidate, None)?;
-        let _ = self.runtime.configuration_changed();
-        Ok(())
+        self.store.commit(candidate, expected_revision)?;
+        let runtime = self.runtime.configuration_changed();
+        self.status_with_runtime(runtime)
     }
 
     /// 端口或运行合同升级时自动生成新 revision，避免旧 generation 继续占用 Clash 端口。
@@ -389,7 +400,12 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
                 proxy_name: format!("FH-{}", item.id),
             })
             .collect::<Vec<_>>();
-        if current.state.mode == OperatingMode::DoubleHop {
+        // 团队定制版只有一个统一节点列表，未连接且当前选中香港时也要能测试全部出口。
+        #[cfg(feature = "pyxis")]
+        let include_proton = true;
+        #[cfg(not(feature = "pyxis"))]
+        let include_proton = current.state.mode == OperatingMode::DoubleHop;
+        if include_proton {
             targets.extend(
                 current
                     .state
@@ -542,6 +558,36 @@ struct ParsedImport {
     display_name: String,
     config: WireGuardConfig,
     source_sha256: String,
+}
+
+#[cfg(feature = "pyxis")]
+fn state_matches_embedded(state: &AppState, imports: &[ParsedImport]) -> bool {
+    let expected_first_hops = imports
+        .iter()
+        .filter(|item| item.role == SourceRole::FirstHop)
+        .count();
+    let expected_proton = imports
+        .iter()
+        .filter(|item| item.role == SourceRole::Proton)
+        .count();
+    if state.first_hops.len() != expected_first_hops || state.proton_nodes.len() != expected_proton
+    {
+        return false;
+    }
+
+    imports.iter().all(|item| {
+        let resources = match item.role {
+            SourceRole::FirstHop => &state.first_hops,
+            SourceRole::Proton => &state.proton_nodes,
+        };
+        resources.iter().any(|resource| {
+            resource.id.as_str() == item.id
+                && resource.display_name == item.display_name
+                && resource
+                    .current_version()
+                    .is_some_and(|version| version.source_sha256 == item.source_sha256)
+        })
+    })
 }
 
 fn merge_imports(

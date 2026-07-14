@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check } from "@phosphor-icons/react/Check";
+import { CaretDown } from "@phosphor-icons/react/CaretDown";
 import { DotsThreeVertical } from "@phosphor-icons/react/DotsThreeVertical";
 import { Lightning } from "@phosphor-icons/react/Lightning";
 import { Trash } from "@phosphor-icons/react/Trash";
@@ -132,17 +133,78 @@ function ModeBar({ mode, disabled, hasExitNode, testing, onRequestMode, onTest }
   );
 }
 
-function NodeSelector({ label, profiles, value, delays, testingIds, disabled, selectionDisabled, onSelect }) {
+function teamNodeRank(name) {
+  if (name === "香港") return 0;
+  const match = /^(台湾|新加坡)([CYZ]?)([123])$/.exec(name);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  const regionRank = match[1] === "台湾" ? 10 : 100;
+  const ownerRank = { "": 0, C: 0, Y: 10, Z: 20 }[match[2]] ?? 30;
+  return regionRank + ownerRank + Number(match[3]);
+}
+
+function TeamNodeBar({
+  profiles,
+  value,
+  delays,
+  testingIds,
+  browseDisabled,
+  selectionDisabled,
+  testing,
+  onSelect,
+  onTest,
+}) {
+  return (
+    <section className="team-node-bar" aria-label="节点选择">
+      <NodeSelector
+        label="节点"
+        profiles={profiles}
+        value={value}
+        delays={delays}
+        testingIds={testingIds}
+        disabled={browseDisabled}
+        selectionDisabled={selectionDisabled}
+        preserveOrder
+        team
+        onSelect={onSelect}
+      />
+      <button
+        className={`speed-test-button${testing ? " is-testing" : ""}`}
+        type="button"
+        disabled={testing || browseDisabled}
+        aria-label="测试节点延迟"
+        title="测试节点延迟"
+        onClick={onTest}
+      >
+        <Lightning aria-hidden="true" size={21} weight={testing ? "fill" : "regular"} />
+      </button>
+    </section>
+  );
+}
+
+function NodeSelector({
+  label,
+  profiles,
+  value,
+  delays,
+  testingIds,
+  disabled,
+  selectionDisabled,
+  onSelect,
+  preserveOrder = false,
+  team = false,
+}) {
   const [open, setOpen] = useState(false);
   const [floatingStyle, setFloatingStyle] = useState(null);
   const triggerRef = useRef(null);
   const optionsRef = useRef(null);
   const sortedProfiles = useMemo(
     () =>
-      [...profiles].sort((left, right) =>
-        left.name.localeCompare(right.name, "en", { numeric: true, sensitivity: "base" }),
-      ),
-    [profiles],
+      preserveOrder
+        ? profiles
+        : [...profiles].sort((left, right) =>
+          left.name.localeCompare(right.name, "en", { numeric: true, sensitivity: "base" }),
+        ),
+    [preserveOrder, profiles],
   );
   const close = useCallback(() => {
     setOpen(false);
@@ -159,18 +221,20 @@ function NodeSelector({ label, profiles, value, delays, testingIds, disabled, se
       const trigger = triggerRef.current;
       if (!trigger) return;
       const rect = trigger.getBoundingClientRect();
-      const configTop = trigger.closest(".config-list")?.getBoundingClientRect().top ?? rect.top;
       const viewportPadding = 12;
       const gap = 6;
-      const width = Math.min(390, window.innerWidth - viewportPadding * 2);
+      const width = team
+        ? rect.width
+        : Math.min(390, window.innerWidth - viewportPadding * 2);
       const left = Math.min(
-        Math.max(rect.left - 12, viewportPadding),
+        Math.max(team ? rect.left : rect.left - 12, viewportPadding),
         window.innerWidth - width - viewportPadding,
       );
       const availableBelow = Math.max(0, window.innerHeight - rect.bottom - viewportPadding);
-      const availableAbove = Math.max(0, rect.top - configTop - gap);
-      const openBelow = availableBelow >= availableAbove;
-      const maxHeight = Math.max(1, Math.min(220, openBelow ? availableBelow : availableAbove));
+      const availableAbove = Math.max(0, rect.top - viewportPadding - gap);
+      const openBelow = team || availableBelow >= availableAbove;
+      const maxOptionsHeight = team ? 136 : 220;
+      const maxHeight = Math.max(1, Math.min(maxOptionsHeight, openBelow ? availableBelow : availableAbove));
       setFloatingStyle({
         top: openBelow ? rect.bottom + gap : rect.top - gap - maxHeight,
         left,
@@ -182,11 +246,11 @@ function NodeSelector({ label, profiles, value, delays, testingIds, disabled, se
     placeOptions();
     window.addEventListener("resize", placeOptions);
     return () => window.removeEventListener("resize", placeOptions);
-  }, [open]);
+  }, [open, team]);
 
   return (
-    <div className="node-selector" ref={rootRef}>
-      <span className="config-label">{label}</span>
+    <div className={`node-selector${team ? " is-team" : ""}`} ref={rootRef}>
+      {!team ? <span className="config-label">{label}</span> : null}
       <button
         className="node-selector-trigger"
         type="button"
@@ -206,13 +270,16 @@ function NodeSelector({ label, profiles, value, delays, testingIds, disabled, se
         }}
       >
         <span>{currentName}</span>
-        <span className={`selected-delay${currentDelay ? ` is-${currentDelay.tone}` : ""}`}>
-          {currentDelay?.label === "—" ? "" : currentDelay?.label}
+        <span className="node-selection-meta">
+          <span className={`selected-delay${currentDelay ? ` is-${currentDelay.tone}` : ""}`}>
+            {currentDelay?.label === "—" ? "" : currentDelay?.label}
+          </span>
+          <CaretDown aria-hidden="true" size={15} weight="bold" />
         </span>
       </button>
       {open && floatingStyle ? createPortal(
         <div
-          className="node-options"
+          className={`node-options${team ? " is-team" : ""}`}
           id={`${label}-options`}
           role="listbox"
           aria-label={label}
@@ -347,10 +414,49 @@ function ConfirmDialog({ title, message, confirmLabel = "确定", destructive = 
   );
 }
 
+function MemberDialog({ busy, error, onSubmit }) {
+  const [value, setValue] = useState("");
+  const ref = useRef(null);
+
+  useEffect(() => {
+    ref.current?.showModal();
+  }, []);
+
+  return (
+    <dialog className="member-dialog" ref={ref} onCancel={(event) => event.preventDefault()}>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (value.trim()) void onSubmit(value);
+        }}
+      >
+        <h2>输入你的名字</h2>
+        <p>使用拼音小写</p>
+        <input
+          autoFocus
+          autoComplete="off"
+          spellCheck="false"
+          value={value}
+          placeholder="例如：zhangsan"
+          disabled={busy}
+          onChange={(event) => setValue(event.target.value.toLowerCase())}
+        />
+        <span className={`member-error${error ? " is-visible" : ""}`} role="alert">
+          {error ?? ""}
+        </span>
+        <button type="submit" disabled={busy || !value.trim()}>
+          {busy ? "正在准备" : "继续"}
+        </button>
+      </form>
+    </dialog>
+  );
+}
+
 export function App() {
   const controller = useAppController();
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [requestedMode, setRequestedMode] = useState(null);
+  const [requestedTeamNode, setRequestedTeamNode] = useState(null);
   const view = connectionView(controller.status, controller.pendingAction);
   const active = view.connected || BUSY_STATES.has(controller.status.runtimeState);
   const operationPending = Boolean(controller.pendingAction);
@@ -361,15 +467,31 @@ export function App() {
   const nodeControlsDisabled = controller.loading || operationPending || controller.testingDelays || active;
   const nodeBrowseDisabled = controller.loading;
   const generalControlsDisabled = controller.loading || operationPending || controller.testingDelays;
+  const teamBrowseDisabled = controller.loading
+    || operationPending
+    || BUSY_STATES.has(controller.status.runtimeState);
+  const teamSelectionDisabled = teamBrowseDisabled || controller.testingDelays;
   const firstHop = selectedName(controller.status.firstHops, controller.status.selectedFirstHop);
   const proton = selectedName(controller.status.protonNodes, controller.status.selectedProton);
+  const teamProfiles = useMemo(() => {
+    const first = controller.status.firstHops.map((profile) => ({ ...profile, name: "香港" }));
+    const exits = [...controller.status.protonNodes].sort((left, right) =>
+      teamNodeRank(left.name) - teamNodeRank(right.name)
+        || left.name.localeCompare(right.name, "zh-Hans-CN", { numeric: true }),
+    );
+    return [...first, ...exits];
+  }, [controller.status.firstHops, controller.status.protonNodes]);
+  const selectedTeamNode = controller.status.mode === "single"
+    ? controller.status.selectedFirstHop
+    : controller.status.selectedProton;
   const feedback = controller.feedback?.message ?? controller.pollError;
   const canToggleConnection = view.connected
     ? !controller.loading && !operationPending && !controller.testingDelays
     : controller.status.configured
       && controller.status.canConnect
       && !operationPending
-      && !controller.testingDelays;
+      && !controller.testingDelays
+      && (!PYXIS_BUILD || !controller.memberRequired);
 
   const confirmDelete = async () => {
     const target = deleteTarget;
@@ -392,8 +514,39 @@ export function App() {
     void controller.switchMode(mode);
   };
 
+  const applyTeamNode = async (profileId) => {
+    const isHongKong = controller.status.firstHops.some((profile) => profile.id === profileId);
+    if (isHongKong) {
+      return controller.updateSelection({
+        mode: "single",
+        selectedFirstHop: profileId,
+      });
+    }
+    return controller.updateSelection({
+      mode: "double",
+      selectedProton: profileId,
+    });
+  };
+
+  const requestTeamNode = (profileId) => {
+    if (profileId === selectedTeamNode) return;
+    if (view.connected) {
+      setRequestedTeamNode(profileId);
+      return;
+    }
+    void applyTeamNode(profileId);
+  };
+
+  const confirmTeamNodeChange = async () => {
+    const profileId = requestedTeamNode;
+    setRequestedTeamNode(null);
+    if (!profileId) return;
+    if (view.connected && !(await controller.disconnect())) return;
+    await applyTeamNode(profileId);
+  };
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell${PYXIS_BUILD ? " is-pyxis-team" : ""}`}>
       <ConnectionControl
         view={view}
         disabled={!canToggleConnection}
@@ -401,51 +554,66 @@ export function App() {
         onDisconnect={controller.disconnect}
       />
 
-      <ModeBar
-        mode={controller.status.mode}
-        disabled={generalControlsDisabled}
-        hasExitNode={controller.status.protonNodes.length > 0}
-        testing={controller.testingDelays}
-        onRequestMode={requestMode}
-        onTest={controller.testDelays}
-      />
-
-      <section
-        className={`config-list${controller.status.mode === "double" ? " has-exit" : ""}`}
-        aria-label="节点配置"
-      >
-        <ConfigRow
-          label="转发节点"
-          role="first-hop"
-          profiles={controller.status.firstHops}
-          value={controller.status.selectedFirstHop}
+      {PYXIS_BUILD ? (
+        <TeamNodeBar
+          profiles={teamProfiles}
+          value={selectedTeamNode}
           delays={controller.delays}
           testingIds={testingIds}
-          disabled={nodeControlsDisabled}
-          browseDisabled={nodeBrowseDisabled}
-          onSelect={(selectedFirstHop) => controller.updateSelection({ selectedFirstHop })}
-          onImport={controller.importConfigs}
-          onDelete={setDeleteTarget}
+          browseDisabled={teamBrowseDisabled}
+          selectionDisabled={teamSelectionDisabled}
+          testing={controller.testingDelays}
+          onSelect={requestTeamNode}
+          onTest={controller.testDelays}
         />
-        <div
-          className={`exit-node-slot${controller.status.mode === "double" ? " is-visible" : ""}`}
-          aria-hidden={controller.status.mode !== "double"}
-        >
-          <ConfigRow
-            label="出口节点"
-            role="proton"
-            profiles={controller.status.protonNodes}
-            value={controller.status.selectedProton}
-            delays={controller.delays}
-            testingIds={testingIds}
-            disabled={nodeControlsDisabled || controller.status.mode !== "double"}
-            browseDisabled={nodeBrowseDisabled || controller.status.mode !== "double"}
-            onSelect={(selectedProton) => controller.updateSelection({ selectedProton })}
-            onImport={controller.importConfigs}
-            onDelete={setDeleteTarget}
+      ) : (
+        <>
+          <ModeBar
+            mode={controller.status.mode}
+            disabled={generalControlsDisabled}
+            hasExitNode={controller.status.protonNodes.length > 0}
+            testing={controller.testingDelays}
+            onRequestMode={requestMode}
+            onTest={controller.testDelays}
           />
-        </div>
-      </section>
+          <section
+            className={`config-list${controller.status.mode === "double" ? " has-exit" : ""}`}
+            aria-label="节点配置"
+          >
+            <ConfigRow
+              label="转发节点"
+              role="first-hop"
+              profiles={controller.status.firstHops}
+              value={controller.status.selectedFirstHop}
+              delays={controller.delays}
+              testingIds={testingIds}
+              disabled={nodeControlsDisabled}
+              browseDisabled={nodeBrowseDisabled}
+              onSelect={(selectedFirstHop) => controller.updateSelection({ selectedFirstHop })}
+              onImport={controller.importConfigs}
+              onDelete={setDeleteTarget}
+            />
+            <div
+              className={`exit-node-slot${controller.status.mode === "double" ? " is-visible" : ""}`}
+              aria-hidden={controller.status.mode !== "double"}
+            >
+              <ConfigRow
+                label="出口节点"
+                role="proton"
+                profiles={controller.status.protonNodes}
+                value={controller.status.selectedProton}
+                delays={controller.delays}
+                testingIds={testingIds}
+                disabled={nodeControlsDisabled || controller.status.mode !== "double"}
+                browseDisabled={nodeBrowseDisabled || controller.status.mode !== "double"}
+                onSelect={(selectedProton) => controller.updateSelection({ selectedProton })}
+                onImport={controller.importConfigs}
+                onDelete={setDeleteTarget}
+              />
+            </div>
+          </section>
+        </>
+      )}
 
       <p
         className={`feedback${feedback ? " is-visible" : ""}${controller.feedback ? ` is-${controller.feedback.kind}` : ""}`}
@@ -454,11 +622,19 @@ export function App() {
         {feedback ?? "状态正常"}
       </p>
 
-      <footer className="route-line">
-        <span key={controller.status.mode}>
-          {controller.status.mode === "double" ? `${firstHop} → ${proton}` : firstHop}
-        </span>
-      </footer>
+      {!PYXIS_BUILD ? (
+        <footer className="route-line">
+          <span key={controller.status.mode}>
+            {controller.status.mode === "double" ? `${firstHop} → ${proton}` : firstHop}
+          </span>
+        </footer>
+      ) : null}
+
+      {PYXIS_BUILD && controller.pyxisMember ? (
+        <footer className="pyxis-member-signature">
+          Pyxis - {controller.pyxisMember}
+        </footer>
+      ) : null}
 
       {deleteTarget ? (
         <ConfirmDialog
@@ -476,6 +652,21 @@ export function App() {
           message="切换模式会中断连接，确定要继续吗？"
           onCancel={() => setRequestedMode(null)}
           onConfirm={confirmModeChange}
+        />
+      ) : null}
+      {requestedTeamNode ? (
+        <ConfirmDialog
+          title="切换节点"
+          message="切换节点会中断连接，确定要继续吗？"
+          onCancel={() => setRequestedTeamNode(null)}
+          onConfirm={confirmTeamNodeChange}
+        />
+      ) : null}
+      {PYXIS_BUILD && controller.memberRequired ? (
+        <MemberDialog
+          busy={controller.pendingAction === "member"}
+          error={controller.memberError}
+          onSubmit={controller.activateMember}
         />
       ) : null}
     </main>

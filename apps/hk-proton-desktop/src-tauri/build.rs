@@ -3,8 +3,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const FIRST_HOP_FILE_NAME: &str = "hk-VPN-wireguard.conf";
-const EXPECTED_PYXIS_PROFILE_COUNT: usize = 9;
+const PYXIS_MEMBERS: [&str; 4] = ["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna"];
+const EXPECTED_PYXIS_PROFILE_COUNT: usize = 40;
+
+struct PyxisSource {
+    member: String,
+    role: &'static str,
+    display_name: String,
+    contents: Vec<u8>,
+}
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SLPYW2W_PYXIS_CONFIG_ROOT");
@@ -61,103 +68,144 @@ fn generate_pyxis_bundle() {
         "pyxis 配置来源目录不安全"
     );
 
-    let mut files = Vec::new();
-    collect_conf_files(&source_root, &source_root, &mut files);
-    files.sort_by_key(|path| {
-        path.strip_prefix(&source_root)
-            .expect("pyxis 配置路径越界")
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase()
-    });
+    let mut profiles = Vec::new();
+    for member in PYXIS_MEMBERS {
+        let first_hop = source_root.join(format!("{member}.conf"));
+        profiles.push(PyxisSource {
+            member: member.to_owned(),
+            role: "SourceRole::FirstHop",
+            display_name: "香港".to_owned(),
+            contents: read_safe_source(&source_root, &first_hop),
+        });
+
+        let proton_file = source_root.join(format!("{member}.txt"));
+        let proton_source = read_safe_source(&source_root, &proton_file);
+        profiles.extend(parse_pyxis_proton_profiles(member, &proton_source));
+        println!("cargo:rerun-if-changed={}", first_hop.display());
+        println!("cargo:rerun-if-changed={}", proton_file.display());
+    }
     assert_eq!(
-        files.len(),
+        profiles.len(),
         EXPECTED_PYXIS_PROFILE_COUNT,
-        "pyxis 构建必须恰好包含九份 WireGuard 配置"
+        "pyxis 团队构建必须恰好包含四十份成员配置"
     );
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR 缺失"));
     let mut generated =
         String::from("const EMBEDDED_PYXIS_PROFILES: &[EmbeddedPyxisProfile] = &[\n");
-    let mut first_hop_count = 0_usize;
-    for (index, source) in files.iter().enumerate() {
-        let metadata = fs::symlink_metadata(source).expect("无法读取 pyxis 配置元数据");
-        assert!(
-            metadata.is_file() && !is_reparse(&metadata),
-            "pyxis 配置文件不安全"
-        );
-        let file_name = source
-            .file_name()
-            .and_then(|value| value.to_str())
-            .expect("pyxis 配置文件名不是 UTF-8");
-        let is_first_hop = file_name.eq_ignore_ascii_case(FIRST_HOP_FILE_NAME);
-        if is_first_hop {
-            first_hop_count += 1;
-        }
-        let display_name = pyxis_display_name(source, is_first_hop);
+    for (index, profile) in profiles.iter().enumerate() {
         let embedded_path = out_dir.join(format!("pyxis-profile-{index}.conf"));
-        let contents = fs::read(source).expect("无法读取 pyxis 配置");
         assert!(
-            !contents.is_empty() && contents.len() <= 256 * 1024,
+            !profile.contents.is_empty() && profile.contents.len() <= 256 * 1024,
             "pyxis 配置大小无效"
         );
-        fs::write(&embedded_path, contents).expect("无法生成 pyxis 内置配置");
-        println!("cargo:rerun-if-changed={}", source.display());
-
-        let role = if is_first_hop {
-            "SourceRole::FirstHop"
-        } else {
-            "SourceRole::Proton"
-        };
+        fs::write(&embedded_path, &profile.contents).expect("无法生成 pyxis 内置配置");
         generated.push_str(&format!(
-            "    EmbeddedPyxisProfile {{ role: {role}, display_name: {display_name:?}, contents: include_bytes!({path:?}) }},\n",
+            "    EmbeddedPyxisProfile {{ member: {member:?}, role: {role}, display_name: {display_name:?}, contents: include_bytes!({path:?}) }},\n",
+            member = profile.member,
+            role = profile.role,
+            display_name = profile.display_name,
             path = embedded_path.to_string_lossy(),
         ));
     }
-    assert_eq!(first_hop_count, 1, "pyxis 构建必须恰好包含一份转发节点配置");
     generated.push_str("];\n");
     fs::write(out_dir.join("pyxis_profiles.rs"), generated).expect("无法生成 pyxis 配置索引");
 }
 
-fn collect_conf_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) {
-    let canonical_directory = directory.canonicalize().expect("无法规范化 pyxis 配置目录");
-    assert!(canonical_directory.starts_with(root), "pyxis 配置目录越界");
-    for entry in fs::read_dir(directory).expect("无法枚举 pyxis 配置目录") {
-        let entry = entry.expect("无法读取 pyxis 配置目录项");
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).expect("无法读取 pyxis 配置目录项元数据");
-        assert!(!is_reparse(&metadata), "pyxis 配置来源包含重解析点");
-        if metadata.is_dir() {
-            collect_conf_files(root, &path, files);
-        } else if metadata.is_file()
-            && path
-                .extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value.eq_ignore_ascii_case("conf"))
-        {
-            let canonical_file = path.canonicalize().expect("无法规范化 pyxis 配置文件");
-            assert!(canonical_file.starts_with(root), "pyxis 配置文件越界");
-            files.push(canonical_file);
-        }
-    }
+fn read_safe_source(root: &Path, path: &Path) -> Vec<u8> {
+    let metadata = fs::symlink_metadata(path).expect("无法读取 pyxis 配置元数据");
+    assert!(
+        metadata.is_file() && !is_reparse(&metadata),
+        "pyxis 配置文件不安全"
+    );
+    assert!(metadata.len() <= 256 * 1024, "pyxis 配置文件过大");
+    let canonical = path.canonicalize().expect("无法规范化 pyxis 配置文件");
+    assert!(canonical.starts_with(root), "pyxis 配置文件越界");
+    fs::read(canonical).expect("无法读取 pyxis 配置")
 }
 
-fn pyxis_display_name(path: &Path, is_first_hop: bool) -> String {
-    if is_first_hop {
-        return "香港 WireGuard".to_owned();
+fn parse_pyxis_proton_profiles(member: &str, source: &[u8]) -> Vec<PyxisSource> {
+    let source = std::str::from_utf8(source).expect("pyxis Proton 配置不是 UTF-8");
+    let mut owner = member.to_owned();
+    let mut profiles = Vec::new();
+    let mut current = Vec::<String>::new();
+    let mut current_node = None::<String>;
+
+    let flush = |profiles: &mut Vec<PyxisSource>,
+                 current: &mut Vec<String>,
+                 current_node: &mut Option<String>,
+                 owner: &str| {
+        if current.is_empty() {
+            return;
+        }
+        let node = current_node.take().expect("pyxis Proton 配置缺少节点注释");
+        let display_name = pyxis_node_name(member, owner, &node);
+        let mut contents = current.join("\n").into_bytes();
+        contents.push(b'\n');
+        profiles.push(PyxisSource {
+            member: member.to_owned(),
+            role: "SourceRole::Proton",
+            display_name,
+            contents,
+        });
+        current.clear();
+    };
+
+    for raw_line in source.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed == "[Interface]" && !current.is_empty() {
+            flush(&mut profiles, &mut current, &mut current_node, &owner);
+        }
+        if let Some(value) = trimmed.strip_prefix("# Key for ") {
+            owner = value.trim().to_ascii_lowercase();
+            assert!(
+                PYXIS_MEMBERS.contains(&owner.as_str()),
+                "pyxis 配置包含未知成员"
+            );
+        }
+        if trimmed.starts_with("# TW#") || trimmed.starts_with("# SG#") {
+            current_node = Some(trimmed.trim_start_matches('#').trim().to_owned());
+        }
+        // 文本中的横线只是人工分隔符，不属于 WireGuard 配置。
+        if !trimmed.is_empty() && trimmed.chars().all(|value| value == '-') {
+            continue;
+        }
+        current.push(line.to_owned());
     }
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .expect("pyxis 配置文件名不是 UTF-8");
-    const PREFIX: &str = "hk-proton-mihomo-";
-    if stem
-        .get(..PREFIX.len())
-        .is_some_and(|value| value.eq_ignore_ascii_case(PREFIX))
-    {
-        return format!("Proton {}", &stem[PREFIX.len()..]);
+    flush(&mut profiles, &mut current, &mut current_node, &owner);
+
+    let expected = if member == "zhenjiabao" { 18 } else { 6 };
+    assert_eq!(
+        profiles.len(),
+        expected,
+        "pyxis 成员的 Proton 配置数量不正确"
+    );
+    profiles
+}
+
+fn pyxis_node_name(member: &str, owner: &str, node: &str) -> String {
+    let (region, number) = match node {
+        "TW#32" => ("台湾", 1),
+        "TW#31" => ("台湾", 2),
+        "TW#30" => ("台湾", 3),
+        "SG#246" => ("新加坡", 1),
+        "SG#217" => ("新加坡", 2),
+        "SG#213" => ("新加坡", 3),
+        _ => panic!("pyxis 包含未知 Proton 节点"),
+    };
+    if member == "zhenjiabao" {
+        let prefix = match owner {
+            "cheyuxuan" => "C",
+            "yanggengbo" => "Y",
+            "zuoanna" => "Z",
+            _ => panic!("zhenjiabao 的 Proton 配置来源无效"),
+        };
+        format!("{region}{prefix}{number}")
+    } else {
+        assert_eq!(member, owner, "成员 Proton 配置归属不一致");
+        format!("{region}{number}")
     }
-    stem.to_owned()
 }
 
 #[cfg(windows)]

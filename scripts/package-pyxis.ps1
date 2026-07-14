@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ConfigRoot = 'E:\Aaaovo\Documents\tools\hk-proton',
+    [string]$ConfigRoot = 'E:\Aaaovo\Documents\tools\hk-proton\pyxis-vpn-conf',
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
     [string]$ReleaseName = 'slpyW2W-pyxis'
 )
@@ -11,7 +11,7 @@ $desktopRoot = Join-Path $projectRoot 'apps\hk-proton-desktop'
 $builtApp = Join-Path $projectRoot 'target\release\hk-proton-desktop.exe'
 $mihomo = Join-Path $projectRoot 'tools\mihomo\1.19.28\bin\mihomo-windows-amd64-compatible.exe'
 $releaseRoot = Join-Path $projectRoot (Join-Path 'release' $ReleaseName)
-$productFile = 'slpyW2W - pyxis.exe'
+$productFile = 'slpyW2W - Pyxis VPN.exe'
 $expectedMihomoSha256 = 'A3799F2D75C623A7C6D307E1FAF88269E24DD746C59DF3E9F1C84D5CFBFF6C92'
 
 $resolvedConfigRoot = (Resolve-Path -LiteralPath $ConfigRoot).Path
@@ -57,15 +57,20 @@ finally {
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 $productPath = Join-Path $releaseRoot $productFile
 Copy-Item -LiteralPath $builtApp -Destination $productPath -Force
+$legacyProduct = Join-Path $releaseRoot 'slpyW2W - pyxis.exe'
+if (Test-Path -LiteralPath $legacyProduct -PathType Leaf) {
+    Remove-Item -LiteralPath $legacyProduct -Force
+}
 $legacyExternalCore = Join-Path $releaseRoot 'mihomo.exe'
 if (Test-Path -LiteralPath $legacyExternalCore -PathType Leaf) {
     Remove-Item -LiteralPath $legacyExternalCore -Force
 }
 
 $manifest = [ordered]@{
-    product = 'slpyW2W - pyxis'
+    product = 'slpyW2W - Pyxis VPN'
     version = '0.1.0'
-    profileCount = 9
+    profileCount = 40
+    memberCount = 4
     mihomoVersion = '1.19.28'
     files = @(
         [ordered]@{

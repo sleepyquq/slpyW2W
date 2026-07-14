@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   connectApp,
+  activatePyxisMember,
   disconnectApp,
   getAppStatus,
   importConfigFiles,
@@ -16,6 +17,13 @@ import {
 } from "./appBridge.js";
 
 const INITIAL_STATUS = normalizeAppStatus(null);
+const PYXIS_BUILD = import.meta.env.VITE_PYXIS_BUILD === "true";
+const MEMBER_STORAGE_KEY = "slpyw2w.pyxis.member.v1";
+
+function storedPyxisMember() {
+  if (!PYXIS_BUILD || typeof window === "undefined") return "";
+  return window.localStorage.getItem(MEMBER_STORAGE_KEY)?.trim().toLowerCase() ?? "";
+}
 
 export function useAppController() {
   const [status, setStatus] = useState(INITIAL_STATUS);
@@ -25,6 +33,9 @@ export function useAppController() {
   const [pollError, setPollError] = useState(null);
   const [delays, setDelays] = useState({});
   const [testingDelayIds, setTestingDelayIds] = useState([]);
+  const [pyxisMember, setPyxisMember] = useState(storedPyxisMember);
+  const [memberRequired, setMemberRequired] = useState(() => PYXIS_BUILD && !storedPyxisMember());
+  const [memberError, setMemberError] = useState(null);
   const [desktopRuntime] = useState(() => isDesktopRuntime());
   const statusRef = useRef(INITIAL_STATUS);
   const revisionRef = useRef(INITIAL_STATUS.revision);
@@ -103,7 +114,20 @@ export function useAppController() {
 
     const load = async () => {
       try {
-        const rawStatus = await getAppStatus();
+        let rawStatus;
+        if (PYXIS_BUILD && pyxisMember) {
+          try {
+            rawStatus = await activatePyxisMember(pyxisMember);
+          } catch {
+            window.localStorage.removeItem(MEMBER_STORAGE_KEY);
+            setPyxisMember("");
+            setMemberRequired(true);
+            setMemberError("没有找到对应的团队配置，请检查名字。");
+            rawStatus = await getAppStatus();
+          }
+        } else {
+          rawStatus = await getAppStatus();
+        }
         if (!cancelled) {
           commitStatus(rawStatus);
         }
@@ -158,6 +182,29 @@ export function useAppController() {
       }
     };
   }, [commitStatus, desktopRuntime]);
+
+  const activateMember = useCallback(async (value) => {
+    if (!PYXIS_BUILD || operationActiveRef.current) return false;
+    const member = String(value ?? "").trim().toLowerCase();
+    operationActiveRef.current = true;
+    setPendingAction("member");
+    setMemberError(null);
+    try {
+      const result = await activatePyxisMember(member);
+      commitStatus(result);
+      window.localStorage.setItem(MEMBER_STORAGE_KEY, member);
+      setPyxisMember(member);
+      setMemberRequired(false);
+      setDelays({});
+      return true;
+    } catch {
+      setMemberError("没有找到对应的团队配置，请检查名字。");
+      return false;
+    } finally {
+      operationActiveRef.current = false;
+      if (mountedRef.current) setPendingAction(null);
+    }
+  }, [commitStatus]);
 
   const updateSelection = useCallback(
     async (changes) => {
@@ -258,7 +305,7 @@ export function useAppController() {
   const testDelays = useCallback(async () => {
     if (operationActiveRef.current || speedTestActiveRef.current) return false;
     const current = statusRef.current;
-    const targets = current.mode === "double"
+    const targets = PYXIS_BUILD || current.mode === "double"
       ? [...current.firstHops, ...current.protonNodes]
       : current.firstHops;
     speedTestActiveRef.current = true;
@@ -306,6 +353,10 @@ export function useAppController() {
     testingDelayIds,
     testingDelays: testingDelayIds.length > 0,
     desktopRuntime,
+    pyxisMember,
+    memberRequired,
+    memberError,
+    activateMember,
     updateSelection,
     importConfigs,
     deleteProfile,

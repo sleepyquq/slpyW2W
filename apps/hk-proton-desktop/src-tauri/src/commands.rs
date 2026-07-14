@@ -38,6 +38,25 @@ pub async fn get_app_status(service: State<'_, SharedDesktopService>) -> Command
 }
 
 #[tauri::command]
+pub async fn activate_pyxis_member(
+    member: String,
+    service: State<'_, SharedDesktopService>,
+) -> CommandResult {
+    #[cfg(feature = "pyxis")]
+    {
+        return run_service_command(service, move |service| {
+            service.activate_pyxis_member(member)
+        })
+        .await;
+    }
+    #[cfg(not(feature = "pyxis"))]
+    {
+        let _ = (member, service);
+        Err(CommandErrorDto::from(ServiceError::InvalidSelection))
+    }
+}
+
+#[tauri::command]
 pub async fn import_config_files(
     role: UiProfileRole,
     paths: Vec<std::path::PathBuf>,

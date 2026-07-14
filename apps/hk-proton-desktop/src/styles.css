@@ -25,7 +25,7 @@ body,
 body {
   margin: 0;
   min-width: 560px;
-  min-height: 520px;
+  min-height: 420px;
   overflow: hidden;
   background: #f5f5f7;
   -webkit-font-smoothing: antialiased;
@@ -322,6 +322,14 @@ button:focus-visible {
   font-size: 12px;
 }
 
+.node-selection-meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  color: #8e8e93;
+}
+
 .selected-delay.is-fast,
 .node-delay.is-fast { color: #248a3d; }
 
@@ -383,6 +391,9 @@ button:focus-visible {
 .node-options button.is-selected { background: rgb(0 124 136 / 9%); }
 .node-options button:not(.is-selected) > svg { opacity: 0; }
 .node-options button > svg { color: var(--accent); }
+
+.node-options.is-team { padding: 5px; }
+.node-options.is-team button { min-height: 31px; }
 
 .node-option-name {
   overflow: hidden;
@@ -492,6 +503,162 @@ button:focus-visible {
   animation: route-swap 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+.app-shell.is-pyxis-team {
+  padding: 8px 52px 18px;
+}
+
+.is-pyxis-team .connection-panel {
+  flex-basis: 224px;
+}
+
+.is-pyxis-team .connection-orbit {
+  width: 218px;
+  height: 218px;
+}
+
+.is-pyxis-team .connection-circle {
+  width: 158px;
+  height: 158px;
+  font-size: 18px;
+}
+
+.is-pyxis-team .ripple-layer i { inset: 30px; }
+
+.team-node-bar {
+  display: flex;
+  align-items: center;
+  width: min(100%, 418px);
+  min-height: 54px;
+  margin: 4px auto 0;
+  gap: 14px;
+}
+
+.team-node-bar .node-selector {
+  flex: 1 1 auto;
+  min-height: 50px;
+}
+
+.node-selector.is-team .node-selector-trigger {
+  height: 50px;
+  padding: 0 15px 0 17px;
+  border: 1px solid rgb(0 0 0 / 7%);
+  border-radius: 14px;
+  background: rgb(255 255 255 / 72%);
+  box-shadow: 0 5px 18px rgb(0 0 0 / 5%);
+  backdrop-filter: blur(22px) saturate(145%);
+  transition: background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.node-selector.is-team .node-selector-trigger:hover:not(:disabled) {
+  background: rgb(255 255 255 / 90%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 7%);
+  transform: translateY(-1px);
+}
+
+.node-selector.is-team .node-selector-trigger > span:first-child {
+  font-size: 16px;
+  font-weight: 560;
+}
+
+.team-node-bar .speed-test-button {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+}
+
+.is-pyxis-team .feedback {
+  margin-top: 10px;
+}
+
+.pyxis-member-signature {
+  position: absolute;
+  right: 0;
+  bottom: 7px;
+  left: 0;
+  color: rgb(110 110 115 / 72%);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+  user-select: none;
+}
+
+.member-dialog {
+  width: 332px;
+  margin: auto;
+  padding: 0;
+  border: 1px solid rgb(255 255 255 / 86%);
+  border-radius: 20px;
+  background: rgb(250 250 252 / 97%);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 22%);
+  backdrop-filter: blur(30px) saturate(150%);
+}
+
+.member-dialog::backdrop { background: rgb(18 22 24 / 20%); backdrop-filter: blur(5px); }
+
+.member-dialog form {
+  display: flex;
+  flex-direction: column;
+  padding: 27px 26px 24px;
+}
+
+.member-dialog h2 {
+  margin: 0;
+  font-size: 19px;
+  letter-spacing: -0.02em;
+  text-align: center;
+}
+
+.member-dialog p {
+  margin: 7px 0 20px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.member-dialog input {
+  width: 100%;
+  height: 44px;
+  padding: 0 13px;
+  border: 1px solid rgb(0 0 0 / 10%);
+  border-radius: 11px;
+  outline: none;
+  color: var(--text);
+  background: rgb(255 255 255 / 82%);
+  font: inherit;
+  font-size: 14px;
+}
+
+.member-dialog input:focus {
+  border-color: rgb(0 124 136 / 46%);
+  box-shadow: 0 0 0 3px rgb(0 124 136 / 10%);
+}
+
+.member-error {
+  min-height: 18px;
+  margin-top: 6px;
+  color: #c9342e;
+  font-size: 12px;
+  line-height: 18px;
+  opacity: 0;
+}
+
+.member-error.is-visible { opacity: 1; }
+
+.member-dialog button {
+  height: 42px;
+  margin-top: 4px;
+  border: 0;
+  border-radius: 11px;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.member-dialog button:disabled { cursor: default; opacity: 0.42; }
+
 @keyframes route-swap {
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }
@@ -536,6 +703,10 @@ button:focus-visible {
   .config-row,
   .node-selector { min-height: 70px; }
   .exit-node-slot.is-visible { max-height: 70px; }
+  .app-shell.is-pyxis-team { padding-top: 4px; }
+  .is-pyxis-team .connection-panel { flex-basis: 214px; }
+  .is-pyxis-team .connection-orbit { width: 208px; height: 208px; }
+  .is-pyxis-team .connection-circle { width: 152px; height: 152px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

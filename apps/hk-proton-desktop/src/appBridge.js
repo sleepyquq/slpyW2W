@@ -94,6 +94,39 @@ export async function getAppStatus() {
   return isDesktopRuntime() ? invoke("get_app_status") : cloneStatus(demoStatus);
 }
 
+export async function activatePyxisMember(member) {
+  if (isDesktopRuntime()) return invoke("activate_pyxis_member", { member });
+  const normalized = String(member ?? "").trim().toLowerCase();
+  const allowed = new Set(["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna"]);
+  if (!allowed.has(normalized)) throw { message: "未找到对应的团队配置。" };
+  const owners = normalized === "zhenjiabao" ? ["C", "Y", "Z"] : [""];
+  const protonNodes = owners.flatMap((owner) => [
+    ...[1, 2, 3].map((index) => ({
+      id: `demo-${normalized}-tw-${owner || "self"}-${index}`,
+      name: `台湾${owner}${index}`,
+      enabled: true,
+    })),
+    ...[1, 2, 3].map((index) => ({
+      id: `demo-${normalized}-sg-${owner || "self"}-${index}`,
+      name: `新加坡${owner}${index}`,
+      enabled: true,
+    })),
+  ]);
+  demoStatus = {
+    ...demoStatus,
+    configured: true,
+    mode: "single",
+    firstHops: [{ id: `demo-${normalized}-hk`, name: "香港", enabled: true }],
+    protonNodes,
+    selectedFirstHop: `demo-${normalized}-hk`,
+    selectedProton: protonNodes[0]?.id ?? null,
+    runtimeState: "disconnected",
+    canConnect: true,
+    revision: demoStatus.revision + 1,
+  };
+  return cloneStatus(demoStatus);
+}
+
 export async function pollAppStatus() {
   return isDesktopRuntime() ? invoke("poll_status") : cloneStatus(demoStatus);
 }

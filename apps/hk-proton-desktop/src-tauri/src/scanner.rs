@@ -31,6 +31,7 @@ pub enum SourceRole {
 
 #[cfg(feature = "pyxis")]
 struct EmbeddedPyxisProfile {
+    member: &'static str,
     role: SourceRole,
     display_name: &'static str,
     contents: &'static [u8],
@@ -46,17 +47,25 @@ pub struct ScannedSource {
     pub contents: Zeroizing<String>,
 }
 
-/// 读取编译进 pyxis EXE 的九份配置。这里只把静态字节复制进 Zeroizing 缓冲区，
+/// 只读取当前成员有权使用的 pyxis 内置配置。这里只把静态字节复制进 Zeroizing 缓冲区，
 /// 后续仍走与手动导入相同的严格解析、候选验证和原子提交链路。
 #[cfg(feature = "pyxis")]
-pub fn scan_embedded_pyxis_profiles() -> ServiceResult<Vec<ScannedSource>> {
-    if EMBEDDED_PYXIS_PROFILES.len() != 9 {
+pub fn scan_embedded_pyxis_profiles(member: &str) -> ServiceResult<Vec<ScannedSource>> {
+    let expected_count = match member {
+        "cheyuxuan" | "yanggengbo" | "zuoanna" => 7,
+        "zhenjiabao" => 19,
+        _ => return Err(ServiceError::InvalidSelection),
+    };
+    if EMBEDDED_PYXIS_PROFILES.len() != 40 {
         return Err(ServiceError::SourceLimitExceeded);
     }
     let mut first_hop_count = 0_usize;
     let mut ids = BTreeSet::new();
-    let mut scanned = Vec::with_capacity(EMBEDDED_PYXIS_PROFILES.len());
-    for profile in EMBEDDED_PYXIS_PROFILES {
+    let mut scanned = Vec::with_capacity(expected_count);
+    for profile in EMBEDDED_PYXIS_PROFILES
+        .iter()
+        .filter(|profile| profile.member == member)
+    {
         let source =
             std::str::from_utf8(profile.contents).map_err(|_| ServiceError::InvalidWireGuard)?;
         let mut hasher = Sha256::new();
@@ -90,6 +99,9 @@ pub fn scan_embedded_pyxis_profiles() -> ServiceResult<Vec<ScannedSource>> {
     }
     if first_hop_count != 1 {
         return Err(ServiceError::MissingFirstHop);
+    }
+    if scanned.len() != expected_count {
+        return Err(ServiceError::SourceLimitExceeded);
     }
     Ok(scanned)
 }

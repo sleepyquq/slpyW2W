@@ -1,17 +1,17 @@
 {
-  "productName": "slpyW2W - pyxis",
+  "productName": "slpyW2W - Pyxis VPN",
   "identifier": "app.slpyw2w.pyxis",
   "app": {
     "windows": [
       {
         "label": "main",
-        "title": "slpyW2W - pyxis",
+        "title": "slpyW2W - Pyxis VPN",
         "width": 560,
-        "height": 520,
+        "height": 420,
         "minWidth": 560,
-        "minHeight": 520,
+        "minHeight": 420,
         "maxWidth": 560,
-        "maxHeight": 520,
+        "maxHeight": 420,
         "resizable": false,
         "maximizable": false,
         "center": true

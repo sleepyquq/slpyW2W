@@ -9,7 +9,7 @@ mod scanner;
 mod service;
 
 #[cfg(feature = "pyxis")]
-const PRODUCT_NAME: &str = "slpyW2W - pyxis";
+const PRODUCT_NAME: &str = "slpyW2W - Pyxis VPN";
 #[cfg(not(feature = "pyxis"))]
 const PRODUCT_NAME: &str = "slpyW2W";
 
@@ -87,6 +87,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_status,
+            commands::activate_pyxis_member,
             commands::import_config_files,
             commands::delete_profile,
             commands::update_selection,
