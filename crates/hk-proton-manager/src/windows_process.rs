@@ -5,6 +5,8 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     ptr::null,
+    thread,
+    time::{Duration, Instant},
 };
 
 use windows_sys::Win32::{
@@ -43,6 +45,7 @@ const REMOVED_MIHOMO_ENVIRONMENT: &[&str] = &[
     "SAFE_PATHS",
     "SKIP_SAFE_PATH_CHECK",
 ];
+const STATIC_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Windows 下受控的 Mihomo 子进程 driver。
 ///
@@ -210,8 +213,18 @@ fn run_static_validation(spec: &CoreLaunchSpec) -> Result<()> {
         let _ = child.wait();
         return Err(error);
     }
-    let status = child.wait().map_err(|_| ManagerError::Process)?;
-    require_successful_validation_exit(status.code())
+    let deadline = Instant::now() + STATIC_VALIDATION_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|_| ManagerError::Process)? {
+            return require_successful_validation_exit(status.code());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ManagerError::MihomoConfigValidationFailed);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn require_successful_validation_exit(code: Option<i32>) -> Result<()> {

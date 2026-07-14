@@ -950,26 +950,25 @@ fn owned_hk_proton_tun_is_ready() -> bool {
                 return false;
             }
 
-            let mut has_public_v4 = false;
-            let mut has_public_v6 = false;
-            for route in snapshot
-                .routes
-                .iter()
-                .filter(|route| route.interface_luid == interface.luid)
-            {
-                match route.destination {
-                    ipnet::IpNet::V4(network) if network.prefix_len() <= 1 => {
-                        has_public_v4 = true;
-                    }
-                    ipnet::IpNet::V6(network) if network.prefix_len() <= 1 => {
-                        has_public_v6 = true;
-                    }
-                    _ => {}
-                }
-            }
-            has_public_v4 && has_public_v6
+            has_complete_public_capture(
+                snapshot
+                    .routes
+                    .iter()
+                    .filter(|route| route.interface_luid == interface.luid)
+                    .map(|route| route.destination),
+            )
         })
     })
+}
+
+/// Mihomo 使用两条 `/1` 拼成每个地址族的完整公网接管。
+/// 只出现其中一半时仍属于路由安装中的过渡态，绝不能宣告 TUN 已就绪。
+fn has_complete_public_capture(destinations: impl IntoIterator<Item = ipnet::IpNet>) -> bool {
+    let observed = destinations.into_iter().collect::<BTreeSet<_>>();
+    ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]
+        .into_iter()
+        .map(|value| value.parse::<ipnet::IpNet>().expect("固定公网路由必须有效"))
+        .all(|expected| observed.contains(&expected))
 }
 
 fn wait_for_owned_cleanup(core_pid: u32, required: &[RequiredPort]) -> bool {
@@ -1490,6 +1489,20 @@ mod tests {
             classify_adapter(true, false, false, false, 0, "VPN", "Virtual"),
             AdapterKind::OtherVirtual
         );
+    }
+
+    #[test]
+    fn tun_readiness_requires_both_halves_of_ipv4_and_ipv6_capture() {
+        let partial = ["0.0.0.0/1", "::/1"].map(|value| value.parse::<ipnet::IpNet>().unwrap());
+        assert!(!has_complete_public_capture(partial));
+
+        let missing_ipv6_half = ["0.0.0.0/1", "128.0.0.0/1", "::/1"]
+            .map(|value| value.parse::<ipnet::IpNet>().unwrap());
+        assert!(!has_complete_public_capture(missing_ipv6_half));
+
+        let complete = ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]
+            .map(|value| value.parse::<ipnet::IpNet>().unwrap());
+        assert!(has_complete_public_capture(complete));
     }
 
     #[test]
