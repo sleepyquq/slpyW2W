@@ -132,9 +132,26 @@ fn generates_multiple_nodes_and_a_deterministic_double_hop_path() {
     assert!(yaml["tun"]["inet6-address"].is_sequence());
 
     let nameservers = yaml["dns"]["nameserver"].as_sequence().unwrap();
+    assert_eq!(nameservers.len(), 1, "双跳公网 DNS 只能来自当前出口节点");
     assert_eq!(
         nameservers[0].as_str(),
         Some("udp://10.3.0.1:53#HK-Proton-Outlet")
+    );
+    assert_eq!(
+        find_proxy(&yaml, "FH-fh-jp").unwrap()["dns"][0].as_str(),
+        Some("10.6.0.1"),
+        "转发节点必须保留自己的 DNS"
+    );
+    assert_eq!(
+        find_proxy(&yaml, "PN-proton-sg").unwrap()["dns"][0].as_str(),
+        Some("10.3.0.1"),
+        "出口节点必须保留自己的 DNS"
+    );
+    assert!(
+        nameservers
+            .iter()
+            .all(|server| !server.as_str().unwrap_or_default().contains("10.6.0.1")),
+        "双跳公网 DNS 不得混入转发节点 DNS"
     );
     assert!(
         !generated
@@ -174,6 +191,11 @@ fn single_hop_uses_the_selected_first_hop_and_its_dns() {
     assert_eq!(
         yaml["dns"]["nameserver"][0].as_str(),
         Some("udp://10.5.5.1:53#HK-Proton-Outlet")
+    );
+    assert_eq!(
+        yaml["dns"]["nameserver"].as_sequence().unwrap().len(),
+        1,
+        "单跳公网 DNS 只能来自当前转发节点"
     );
     assert_eq!(
         generated.validation.active_path,

@@ -138,6 +138,7 @@ impl LiveRuntime {
 
         let snapshot =
             capture_preflight(plan.required_ports()).map_err(|_| ConnectFailure::Preflight)?;
+        let require_ipv6_capture = snapshot_requires_ipv6_capture(&snapshot);
         let report = evaluate_conflicts(&snapshot, plan.required_ports());
         if !report.can_start() {
             let reason = report
@@ -178,6 +179,7 @@ impl LiveRuntime {
             &generation.state,
             &plan,
             core_pid,
+            require_ipv6_capture,
         ) {
             self.supervisor
                 .stop_owned()
@@ -856,6 +858,7 @@ fn wait_for_controller<D: ProcessDriver>(
     state: &AppState,
     plan: &OfflineLaunchPlan,
     core_pid: u32,
+    require_ipv6_capture: bool,
 ) -> Result<(), ConnectFailure> {
     let (controller, secret) =
         controller_credentials(yaml).ok_or(ConnectFailure::ControllerUnavailable)?;
@@ -870,7 +873,7 @@ fn wait_for_controller<D: ProcessDriver>(
         if matches!(supervisor.poll(), Ok(RuntimeState::Failed) | Err(_)) {
             return Err(ConnectFailure::Launch);
         }
-        if expected.tun_enabled && owned_hk_proton_tun_is_ready() {
+        if expected.tun_enabled && owned_hk_proton_tun_is_ready(yaml, require_ipv6_capture) {
             saw_owned_tun = true;
         }
         if let Ok(bindings) = capture_port_bindings()
@@ -932,7 +935,35 @@ fn reconcile_owned_runtime_snapshot(
     }
 }
 
-fn owned_hk_proton_tun_is_ready() -> bool {
+fn snapshot_requires_ipv6_capture(snapshot: &PreflightSnapshot) -> bool {
+    snapshot.adapters.iter().any(|adapter| {
+        adapter.operational_up
+            && adapter.kind == AdapterKind::Physical
+            && adapter.routes.iter().any(
+                |route| matches!(route, ipnet::IpNet::V6(network) if network.prefix_len() == 0),
+            )
+    })
+}
+
+#[derive(Deserialize)]
+struct RuntimeRoutePolicyDocument {
+    tun: RuntimeRoutePolicy,
+}
+
+#[derive(Deserialize)]
+struct RuntimeRoutePolicy {
+    #[serde(rename = "route-address")]
+    route_address: Vec<ipnet::IpNet>,
+    #[serde(rename = "route-exclude-address", default)]
+    route_exclude_address: Vec<ipnet::IpNet>,
+}
+
+fn owned_hk_proton_tun_is_ready(yaml: &SecretValue, require_ipv6_capture: bool) -> bool {
+    let Ok(policy) = serde_yaml_ng::from_str::<RuntimeRoutePolicyDocument>(yaml.expose_secret())
+        .map(|document| document.tun)
+    else {
+        return false;
+    };
     let provider = WindowsNativeSnapshotProvider;
     provider.capture().is_ok_and(|snapshot| {
         snapshot.interfaces.iter().any(|interface| {
@@ -956,19 +987,125 @@ fn owned_hk_proton_tun_is_ready() -> bool {
                     .iter()
                     .filter(|route| route.interface_luid == interface.luid)
                     .map(|route| route.destination),
+                &policy.route_address,
+                &policy.route_exclude_address,
+                require_ipv6_capture,
             )
         })
     })
 }
 
-/// Mihomo 使用两条 `/1` 拼成每个地址族的完整公网接管。
-/// 只出现其中一半时仍属于路由安装中的过渡态，绝不能宣告 TUN 已就绪。
-fn has_complete_public_capture(destinations: impl IntoIterator<Item = ipnet::IpNet>) -> bool {
-    let observed = destinations.into_iter().collect::<BTreeSet<_>>();
-    ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]
-        .into_iter()
-        .map(|value| value.parse::<ipnet::IpNet>().expect("固定公网路由必须有效"))
-        .all(|expected| observed.contains(&expected))
+/// `route-exclude-address` 会让 Mihomo 把两条 `/1` 拆成很多更小的 CIDR，
+/// 因此不能按固定路由名称判断。这里比较实际地址覆盖集合，并保留完整接管要求。
+fn has_complete_public_capture(
+    destinations: impl IntoIterator<Item = ipnet::IpNet>,
+    route_address: &[ipnet::IpNet],
+    route_exclude_address: &[ipnet::IpNet],
+    require_ipv6_capture: bool,
+) -> bool {
+    let observed = destinations.into_iter().collect::<Vec<_>>();
+    [false, true].into_iter().all(|ipv6| {
+        if ipv6 && !require_ipv6_capture {
+            return true;
+        }
+        let included = normalized_address_ranges(route_address, ipv6);
+        if included.is_empty() {
+            return false;
+        }
+        let excluded = normalized_address_ranges(route_exclude_address, ipv6);
+        let expected = subtract_address_ranges(&included, &excluded);
+        let actual = normalized_address_ranges(&observed, ipv6);
+        address_ranges_cover(&actual, &expected)
+    })
+}
+
+fn normalized_address_ranges(networks: &[ipnet::IpNet], ipv6: bool) -> Vec<(u128, u128)> {
+    let mut ranges = networks
+        .iter()
+        .filter_map(|network| match network {
+            ipnet::IpNet::V4(network) if !ipv6 => Some((
+                u32::from(network.network()) as u128,
+                u32::from(network.broadcast()) as u128,
+            )),
+            ipnet::IpNet::V6(network) if ipv6 => {
+                let start = u128::from(network.network());
+                let host_bits = 128 - network.prefix_len();
+                let end = if host_bits == 128 {
+                    u128::MAX
+                } else {
+                    start | ((1_u128 << host_bits) - 1)
+                };
+                Some((start, end))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+
+    let mut normalized: Vec<(u128, u128)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some((_, previous_end)) = normalized.last_mut()
+            && start <= previous_end.saturating_add(1)
+        {
+            *previous_end = (*previous_end).max(end);
+        } else {
+            normalized.push((start, end));
+        }
+    }
+    normalized
+}
+
+fn subtract_address_ranges(
+    included: &[(u128, u128)],
+    excluded: &[(u128, u128)],
+) -> Vec<(u128, u128)> {
+    let mut result = Vec::new();
+    for &(include_start, include_end) in included {
+        let mut cursor = include_start;
+        let mut exhausted = false;
+        for &(exclude_start, exclude_end) in excluded {
+            if exclude_end < cursor || exclude_start > include_end {
+                continue;
+            }
+            if exclude_start > cursor {
+                result.push((cursor, exclude_start - 1));
+            }
+            let Some(next) = exclude_end.checked_add(1) else {
+                exhausted = true;
+                break;
+            };
+            cursor = cursor.max(next);
+            if cursor > include_end {
+                break;
+            }
+        }
+        if !exhausted && cursor <= include_end {
+            result.push((cursor, include_end));
+        }
+    }
+    result
+}
+
+fn address_ranges_cover(actual: &[(u128, u128)], expected: &[(u128, u128)]) -> bool {
+    expected.iter().all(|&(expected_start, expected_end)| {
+        let mut cursor = expected_start;
+        for &(actual_start, actual_end) in actual {
+            if actual_end < cursor {
+                continue;
+            }
+            if actual_start > cursor {
+                return false;
+            }
+            if actual_end >= expected_end {
+                return true;
+            }
+            let Some(next) = actual_end.checked_add(1) else {
+                return true;
+            };
+            cursor = next;
+        }
+        false
+    })
 }
 
 fn wait_for_owned_cleanup(core_pid: u32, required: &[RequiredPort]) -> bool {
@@ -1492,17 +1629,65 @@ mod tests {
     }
 
     #[test]
-    fn tun_readiness_requires_both_halves_of_ipv4_and_ipv6_capture() {
+    fn tun_readiness_accepts_fragmented_complete_routes_but_rejects_partial_capture() {
+        let route_address = ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]
+            .map(|value| value.parse::<ipnet::IpNet>().unwrap());
         let partial = ["0.0.0.0/1", "::/1"].map(|value| value.parse::<ipnet::IpNet>().unwrap());
-        assert!(!has_complete_public_capture(partial));
+        assert!(!has_complete_public_capture(
+            partial,
+            &route_address,
+            &[],
+            true
+        ));
 
         let missing_ipv6_half = ["0.0.0.0/1", "128.0.0.0/1", "::/1"]
             .map(|value| value.parse::<ipnet::IpNet>().unwrap());
-        assert!(!has_complete_public_capture(missing_ipv6_half));
+        assert!(!has_complete_public_capture(
+            missing_ipv6_half,
+            &route_address,
+            &[],
+            true
+        ));
+        assert!(has_complete_public_capture(
+            ["0.0.0.0/1", "128.0.0.0/1"].map(|value| value.parse::<ipnet::IpNet>().unwrap()),
+            &route_address,
+            &[],
+            false
+        ));
 
-        let complete = ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"]
-            .map(|value| value.parse::<ipnet::IpNet>().unwrap());
-        assert!(has_complete_public_capture(complete));
+        let fragmented_complete = [
+            "0.0.0.0/2",
+            "64.0.0.0/2",
+            "128.0.0.0/2",
+            "192.0.0.0/2",
+            "::/2",
+            "4000::/2",
+            "8000::/2",
+            "c000::/2",
+        ]
+        .map(|value| value.parse::<ipnet::IpNet>().unwrap());
+        assert!(has_complete_public_capture(
+            fragmented_complete,
+            &route_address,
+            &[],
+            true
+        ));
+    }
+
+    #[test]
+    fn tun_readiness_accounts_for_intentional_endpoint_exclusions() {
+        let route_address =
+            ["0.0.0.0/1", "128.0.0.0/1"].map(|value| value.parse::<ipnet::IpNet>().unwrap());
+        let exclusions = ["64.0.0.0/2"].map(|value| value.parse::<ipnet::IpNet>().unwrap());
+        let observed =
+            ["0.0.0.0/2", "128.0.0.0/1"].map(|value| value.parse::<ipnet::IpNet>().unwrap());
+
+        assert!(has_complete_public_capture(
+            observed,
+            &route_address,
+            &exclusions,
+            false
+        ));
     }
 
     #[test]
