@@ -9,6 +9,10 @@
 npm-debug.log*
 /release/
 
+# Markdown 文档仅跟踪 README.md，其余文档保留在本地
+*.md
+!README.md
+
 # 本项目的真实运行数据（可能包含 WireGuard 私钥）
 /data/
 /profiles/
