@@ -3,6 +3,7 @@ use std::{fmt, net::IpAddr, str::FromStr};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::{ConfigError, Result, SecretValue};
 
@@ -149,6 +150,123 @@ pub struct WireGuardConfig {
     pub peer: WireGuardPeer,
 }
 
+/// 当前支持的 VLESS 传输。第一阶段只接入 TCP，覆盖 VLESS Reality/TCP 配置，
+/// 其他传输需要单独设计对应的 Mihomo 字段与安全校验。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VlessNetwork {
+    Tcp,
+}
+
+/// 经过解析和字段约束后的 VLESS 出站配置。
+///
+/// UUID 是运行时 secret，Reality 公钥和 short-id 不是认证 secret，但仍只会随
+/// 受保护的运行时 YAML 使用，不会写入普通状态日志。
+#[derive(Clone, Debug)]
+pub struct VlessConfig {
+    pub endpoint: Endpoint,
+    pub uuid: SecretValue,
+    pub network: VlessNetwork,
+    pub udp: bool,
+    pub tls: bool,
+    pub flow: Option<String>,
+    pub servername: Option<String>,
+    pub client_fingerprint: Option<String>,
+    pub packet_encoding: Option<String>,
+    pub reality_public_key: Option<String>,
+    pub reality_short_id: Option<String>,
+    pub skip_cert_verify: bool,
+    pub dns_servers: Vec<IpAddr>,
+}
+
+impl VlessConfig {
+    pub fn checked(
+        endpoint: Endpoint,
+        uuid: SecretValue,
+        network: VlessNetwork,
+        udp: bool,
+        tls: bool,
+        flow: Option<String>,
+        servername: Option<String>,
+        client_fingerprint: Option<String>,
+        packet_encoding: Option<String>,
+        reality_public_key: Option<String>,
+        reality_short_id: Option<String>,
+        skip_cert_verify: bool,
+        dns_servers: Vec<IpAddr>,
+    ) -> Result<Self> {
+        if Uuid::parse_str(uuid.expose_secret()).is_err()
+            || uuid
+                .expose_secret()
+                .eq_ignore_ascii_case(Uuid::nil().to_string().as_str())
+        {
+            return Err(ConfigError::InvalidField {
+                field: "VLESS UUID",
+            });
+        }
+        if !matches!(network, VlessNetwork::Tcp) {
+            return Err(ConfigError::InvalidField {
+                field: "VLESS network",
+            });
+        }
+        let dns_servers: Vec<_> = dns_servers.into_iter().filter(IpAddr::is_ipv4).collect();
+        if dns_servers.is_empty() {
+            return Err(ConfigError::MissingEgressDns);
+        }
+        checked_optional_token(flow.as_deref(), "VLESS flow")?;
+        checked_optional_token(servername.as_deref(), "VLESS servername")?;
+        checked_optional_token(client_fingerprint.as_deref(), "VLESS client-fingerprint")?;
+        checked_optional_token(packet_encoding.as_deref(), "VLESS packet-encoding")?;
+        checked_optional_token(reality_public_key.as_deref(), "VLESS reality public-key")?;
+        checked_optional_token(reality_short_id.as_deref(), "VLESS reality short-id")?;
+        if reality_public_key.is_some() != reality_short_id.is_some() {
+            return Err(ConfigError::InvalidField {
+                field: "VLESS reality-opts",
+            });
+        }
+        if reality_public_key.is_some() && !tls {
+            return Err(ConfigError::InvalidField { field: "VLESS tls" });
+        }
+        if !tls && (flow.is_some() || servername.is_some() || client_fingerprint.is_some()) {
+            return Err(ConfigError::InvalidField {
+                field: "VLESS TLS options",
+            });
+        }
+        Ok(Self {
+            endpoint,
+            uuid,
+            network,
+            udp,
+            tls,
+            flow,
+            servername,
+            client_fingerprint,
+            packet_encoding,
+            reality_public_key,
+            reality_short_id,
+            skip_cert_verify,
+            dns_servers,
+        })
+    }
+}
+
+fn checked_optional_token(value: Option<&str>, field: &'static str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let value = value.trim();
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(ConfigError::InvalidField { field });
+    }
+    Ok(())
+}
+
+/// 两类跳点共用的传输配置。
+#[derive(Clone, Debug)]
+pub enum ProxyConfig {
+    WireGuard(WireGuardConfig),
+    Vless(VlessConfig),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImportMetadata {
     pub imported_at: OffsetDateTime,
@@ -184,7 +302,7 @@ pub struct FirstHopProfile {
     pub id: ProfileId,
     pub display_name: String,
     pub enabled: bool,
-    pub wireguard: WireGuardConfig,
+    pub config: ProxyConfig,
     pub last_probe: Option<ProbeResult>,
     pub metadata: ImportMetadata,
 }
@@ -200,7 +318,23 @@ impl FirstHopProfile {
             id,
             display_name: checked_display_name(display_name)?,
             enabled: true,
-            wireguard,
+            config: ProxyConfig::WireGuard(wireguard),
+            last_probe: None,
+            metadata,
+        })
+    }
+
+    pub fn new_vless(
+        id: ProfileId,
+        display_name: impl Into<String>,
+        vless: VlessConfig,
+        metadata: ImportMetadata,
+    ) -> Result<Self> {
+        Ok(Self {
+            id,
+            display_name: checked_display_name(display_name)?,
+            enabled: true,
+            config: ProxyConfig::Vless(vless),
             last_probe: None,
             metadata,
         })
@@ -216,7 +350,7 @@ pub struct ProtonProfile {
     pub id: ProfileId,
     pub display_name: String,
     pub enabled: bool,
-    pub wireguard: WireGuardConfig,
+    pub config: ProxyConfig,
     pub last_probe: Option<ProbeResult>,
     pub metadata: ImportMetadata,
 }
@@ -232,7 +366,23 @@ impl ProtonProfile {
             id,
             display_name: checked_display_name(display_name)?,
             enabled: true,
-            wireguard,
+            config: ProxyConfig::WireGuard(wireguard),
+            last_probe: None,
+            metadata,
+        })
+    }
+
+    pub fn new_vless(
+        id: ProfileId,
+        display_name: impl Into<String>,
+        vless: VlessConfig,
+        metadata: ImportMetadata,
+    ) -> Result<Self> {
+        Ok(Self {
+            id,
+            display_name: checked_display_name(display_name)?,
+            enabled: true,
+            config: ProxyConfig::Vless(vless),
             last_probe: None,
             metadata,
         })

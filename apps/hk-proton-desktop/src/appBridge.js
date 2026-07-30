@@ -120,7 +120,7 @@ export async function importConfigFiles(role) {
   const selected = await open({
     multiple: true,
     directory: false,
-    filters: [{ name: "WireGuard 配置", extensions: ["conf"] }],
+    filters: [{ name: "WireGuard / VLESS 配置", extensions: ["conf", "txt", "yaml", "yml"] }],
   });
   if (!selected) return { cancelled: true };
   const paths = Array.isArray(selected) ? selected : [selected];
@@ -179,6 +179,16 @@ export async function measureNodeDelays() {
       delayMs: demoDelays[profile.id] ?? null,
     })),
   };
+}
+
+export async function checkForUpdate() {
+  if (isDesktopRuntime()) return invoke("check_for_update");
+  return { configured: false, update: null };
+}
+
+export async function installLatestUpdate() {
+  if (isDesktopRuntime()) return invoke("install_latest_update");
+  return null;
 }
 
 export function toUserMessage(error, fallback = "操作失败，请重试。") {

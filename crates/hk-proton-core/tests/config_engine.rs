@@ -2,8 +2,9 @@ use std::net::IpAddr;
 
 use hk_proton_core::{
     ConfigError, FIRST_HOP_SELECTOR, FirstHopProfile, ImportMetadata, LanPolicy, OUTLET_SELECTOR,
-    OperatingMode, PROTON_SELECTOR, ProfileId, ProtonProfile, RuntimeOptions, RuntimeSelection,
-    SecretValue, TailscalePolicy, generate_profile, parse_wireguard, validate_rendered_profile,
+    OperatingMode, PROTON_SELECTOR, ProfileId, ProtonProfile, ProxyConfig, RuntimeOptions,
+    RuntimeSelection, SecretValue, TailscalePolicy, VlessNetwork, generate_profile, parse_vless,
+    parse_wireguard, validate_rendered_profile,
 };
 use serde_yaml_ng::Value;
 use time::macros::datetime;
@@ -12,6 +13,26 @@ const FIRST_HOP_HK: &str = include_str!("fixtures/first-hop-hk.synthetic.conf");
 const FIRST_HOP_JP: &str = include_str!("fixtures/first-hop-jp.synthetic.conf");
 const PROTON_JP: &str = include_str!("fixtures/proton-jp.synthetic.conf");
 const PROTON_SG: &str = include_str!("fixtures/proton-sg.synthetic.conf");
+const VLESS_REALITY_URI: &str = "vless://22222222-2222-4222-8222-222222222222@203.0.113.44:443?encryption=none&security=reality&sni=example.com&fp=chrome&pbk=9gtLPpU_IgqbuGMC4RQb_hNAK5kil8sHHeaELn1_-z8&sid=01020304&flow=xtls-rprx-vision&type=tcp&udp=1#synthetic-reality";
+const VLESS_MIHOMO_YAML: &str = r#"
+proxies:
+  - name: synthetic-vless
+    type: vless
+    server: 203.0.113.44
+    port: 443
+    uuid: 22222222-2222-4222-8222-222222222222
+    encryption: none
+    udp: true
+    tls: true
+    servername: example.com
+    client-fingerprint: chrome
+    packet-encoding: xudp
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: 9gtLPpU_IgqbuGMC4RQb_hNAK5kil8sHHeaELn1_-z8
+      short-id: 01020304
+    network: tcp
+"#;
 
 #[test]
 fn parses_standard_wireguard_without_exposing_secrets_in_debug() {
@@ -59,6 +80,98 @@ fn supports_bom_crlf_comments_and_split_default_routes() {
     let parsed = parse_wireguard(&input).expect("BOM/CRLF 应受支持");
     assert_eq!(parsed.config.peer.allowed_ips.len(), 2);
     assert!(parsed.config.peer.preshared_key.is_none());
+}
+
+#[test]
+fn parses_vless_uri_and_redacts_uuid_from_debug() {
+    let parsed = parse_vless(VLESS_REALITY_URI).expect("合成 VLESS URI 应可解析");
+    assert_eq!(parsed.config.endpoint.server(), "203.0.113.44");
+    assert_eq!(parsed.config.endpoint.port, 443);
+    assert_eq!(parsed.config.servername.as_deref(), Some("example.com"));
+    assert_eq!(parsed.config.network, VlessNetwork::Tcp);
+    assert_eq!(parsed.config.reality_short_id.as_deref(), Some("01020304"));
+    let debug = format!("{parsed:?}");
+    assert!(debug.contains("SecretValue([REDACTED])"));
+    assert!(!debug.contains("22222222-2222-4222-8222-222222222222"));
+}
+
+#[test]
+fn parses_vless_mihomo_yaml_fields_used_by_imported_profiles() {
+    let parsed = parse_vless(VLESS_MIHOMO_YAML).expect("合成 Mihomo VLESS YAML 应可解析");
+    assert_eq!(parsed.config.packet_encoding.as_deref(), Some("xudp"));
+    assert_eq!(parsed.config.client_fingerprint.as_deref(), Some("chrome"));
+    assert_eq!(
+        parsed.config.reality_public_key.as_deref().map(str::len),
+        Some(43)
+    );
+}
+
+#[test]
+fn generates_all_four_wireguard_vless_hop_combinations() {
+    for (first_vless, proton_vless) in [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let first = if first_vless {
+            FirstHopProfile::new_vless(
+                id("fh-combo"),
+                "合成 VLESS 第一跳",
+                parse_vless(VLESS_REALITY_URI).unwrap().config,
+                metadata("a".repeat(64)),
+            )
+            .unwrap()
+        } else {
+            first_hop("fh-combo", "合成 WireGuard 第一跳", FIRST_HOP_HK)
+        };
+        let proton = if proton_vless {
+            ProtonProfile::new_vless(
+                id("pn-combo"),
+                "合成 VLESS 第二跳",
+                parse_vless(VLESS_REALITY_URI).unwrap().config,
+                metadata("b".repeat(64)),
+            )
+            .unwrap()
+        } else {
+            proton("pn-combo", "合成 WireGuard 第二跳", PROTON_JP)
+        };
+        let selection = RuntimeSelection {
+            mode: OperatingMode::DoubleHop,
+            first_hop: id("fh-combo"),
+            proton: Some(id("pn-combo")),
+        };
+        let generated = generate_profile(
+            &[first],
+            &[proton],
+            &selection,
+            &LanPolicy::default(),
+            &TailscalePolicy::default(),
+            &runtime(),
+        )
+        .expect("四种链式组合都应生成");
+        let yaml: Value = serde_yaml_ng::from_str(generated.as_str()).unwrap();
+        let first_proxy = find_proxy(&yaml, "FH-fh-combo").unwrap();
+        let proton_proxy = find_proxy(&yaml, "PN-pn-combo").unwrap();
+        assert_eq!(
+            first_proxy["type"].as_str(),
+            Some(if first_vless { "vless" } else { "wireguard" })
+        );
+        assert_eq!(
+            proton_proxy["type"].as_str(),
+            Some(if proton_vless { "vless" } else { "wireguard" })
+        );
+        assert_eq!(
+            proton_proxy["dialer-proxy"].as_str(),
+            Some(FIRST_HOP_SELECTOR)
+        );
+        if first_vless {
+            assert!(first_proxy.get("peers").is_none());
+        }
+        if proton_vless {
+            assert!(proton_proxy.get("peers").is_none());
+            assert_eq!(
+                proton_proxy["reality-opts"]["short-id"].as_str(),
+                Some("01020304")
+            );
+        }
+    }
 }
 
 #[test]
@@ -215,7 +328,9 @@ fn updates_to_each_resource_class_do_not_rewrite_the_other_class() {
     let base_proton = find_proxy(&base, "PN-proton-jp").unwrap().clone();
 
     fixture.first_hops[0].metadata.config_version += 1;
-    fixture.first_hops[0].wireguard.interface.mtu = Some(1320);
+    if let ProxyConfig::WireGuard(config) = &mut fixture.first_hops[0].config {
+        config.interface.mtu = Some(1320);
+    }
     let after_first_hop = render_value(&fixture, &selection);
     assert_eq!(
         find_proxy(&after_first_hop, "PN-proton-jp").unwrap(),
@@ -225,7 +340,9 @@ fn updates_to_each_resource_class_do_not_rewrite_the_other_class() {
 
     let stable_first_hop = find_proxy(&after_first_hop, "FH-fh-hk").unwrap().clone();
     fixture.protons[0].metadata.config_version += 1;
-    fixture.protons[0].wireguard.interface.mtu = Some(1240);
+    if let ProxyConfig::WireGuard(config) = &mut fixture.protons[0].config {
+        config.interface.mtu = Some(1240);
+    }
     let after_proton = render_value(&fixture, &selection);
     assert_eq!(
         find_proxy(&after_proton, "FH-fh-hk").unwrap(),

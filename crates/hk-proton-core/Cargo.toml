@@ -9,11 +9,14 @@ description = "slpyW2W 的安全 WireGuard 导入与 Mihomo 配置生成核心"
 [dependencies]
 base64.workspace = true
 ipnet.workspace = true
+percent-encoding.workspace = true
 serde.workspace = true
 serde_yaml_ng.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
+url.workspace = true
+uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

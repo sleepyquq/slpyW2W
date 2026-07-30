@@ -57,9 +57,13 @@ pub fn scan_selected_files(
         if !path
             .extension()
             .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("conf"))
+            .is_some_and(|value| {
+                ["conf", "txt", "yaml", "yml"]
+                    .iter()
+                    .any(|extension| value.eq_ignore_ascii_case(extension))
+            })
         {
-            return Err(ServiceError::InvalidWireGuard);
+            return Err(ServiceError::InvalidConfiguration);
         }
         if metadata.len() > MAX_CONFIG_BYTES {
             return Err(ServiceError::SourceLimitExceeded);
@@ -313,7 +317,7 @@ fn read_bounded_config(path: &Path) -> ServiceResult<Zeroizing<String>> {
         return Err(ServiceError::SourceLimitExceeded);
     }
     let source =
-        std::str::from_utf8(bytes.as_slice()).map_err(|_| ServiceError::InvalidWireGuard)?;
+        std::str::from_utf8(bytes.as_slice()).map_err(|_| ServiceError::InvalidConfiguration)?;
     Ok(Zeroizing::new(source.to_owned()))
 }
 

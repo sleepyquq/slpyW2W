@@ -30,8 +30,10 @@ sha2.workspace = true
 tauri = { version = "=2.11.5", features = ["tray-icon"] }
 tauri-plugin-dialog = "=2.7.1"
 tauri-plugin-single-instance = "=2.4.2"
+tauri-plugin-updater = "=2.10.1"
 thiserror.workspace = true
 time.workspace = true
+url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 

@@ -20,6 +20,8 @@ pub enum ServiceError {
     InvalidFirstHopLayout,
     #[error("WireGuard 配置无效")]
     InvalidWireGuard,
+    #[error("配置文件无效或包含不支持的代理类型")]
+    InvalidConfiguration,
     #[error("当前选择无效")]
     InvalidSelection,
     #[error("尚未导入配置")]
@@ -72,6 +74,10 @@ impl From<ServiceError> for CommandErrorDto {
             ServiceError::InvalidWireGuard => Self {
                 code: "invalid-wireguard",
                 message: "至少一个 WireGuard 配置无效，未保存任何更改。",
+            },
+            ServiceError::InvalidConfiguration => Self {
+                code: "invalid-configuration",
+                message: "至少一个配置文件无效或包含当前不支持的代理类型，未保存任何更改。",
             },
             ServiceError::InvalidSelection => Self {
                 code: "invalid-selection",

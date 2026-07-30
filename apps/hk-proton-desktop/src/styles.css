@@ -476,6 +476,10 @@ button:focus-visible {
 .feedback.is-warning { color: #ad6800; }
 
 .route-line {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   margin-top: auto;
   padding-top: 5px;
   overflow: hidden;
@@ -489,8 +493,25 @@ button:focus-visible {
 
 .route-line span {
   display: inline-block;
+  min-width: 0;
+  overflow: hidden;
   animation: route-swap 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  text-overflow: ellipsis;
 }
+
+.update-button {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.update-button:hover:not(:disabled) { background: rgb(0 124 136 / 9%); }
+.update-button:disabled { cursor: default; opacity: 0.45; }
 
 @keyframes route-swap {
   from { opacity: 0; transform: translateY(5px); }

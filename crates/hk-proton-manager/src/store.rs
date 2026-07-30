@@ -861,8 +861,13 @@ fn collect_state_secret_refs(state: &AppState) -> Result<BTreeMap<Uuid, SecretRe
         .chain(state.proton_nodes.iter())
         .flat_map(|resource| resource.versions.iter())
     {
-        insert_secret_ref(&mut references, &version.private_key)?;
+        if let Some(reference) = &version.private_key {
+            insert_secret_ref(&mut references, reference)?;
+        }
         if let Some(reference) = &version.preshared_key {
+            insert_secret_ref(&mut references, reference)?;
+        }
+        if let Some(reference) = &version.uuid {
             insert_secret_ref(&mut references, reference)?;
         }
     }

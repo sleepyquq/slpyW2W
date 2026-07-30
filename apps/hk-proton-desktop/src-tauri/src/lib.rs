@@ -7,6 +7,8 @@ mod live_runtime;
 mod runtime;
 mod scanner;
 mod service;
+#[cfg(windows)]
+mod update;
 
 #[cfg(windows)]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -26,6 +28,7 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data_root = app
                 .path()
@@ -86,6 +89,8 @@ pub fn run() {
             commands::disconnect,
             commands::poll_status,
             commands::measure_node_delays,
+            update::check_for_update,
+            update::install_latest_update,
         ])
         .run(tauri::generate_context!())
         .expect("启动 slpyW2W 桌面应用失败");

@@ -32,6 +32,7 @@ impl DpapiCurrentUserProtector {
         let purpose = match reference.purpose {
             SecretPurpose::WireGuardPrivateKey => "wireguard-private-key",
             SecretPurpose::WireGuardPresharedKey => "wireguard-preshared-key",
+            SecretPurpose::VlessUuid => "vless-uuid",
             SecretPurpose::RuntimeProfile => "runtime-profile",
             SecretPurpose::ManifestHmac => "manifest-hmac",
         };

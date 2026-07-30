@@ -464,6 +464,20 @@ export function App() {
         <span key={controller.status.mode}>
           {controller.status.mode === "double" ? `${firstHop} → ${proton}` : firstHop}
         </span>
+        {controller.desktopRuntime ? (
+          <button
+            className="update-button"
+            type="button"
+            disabled={active || operationPending || controller.testingDelays || controller.updateBusy}
+            onClick={controller.updateInfo ? controller.installUpdate : controller.checkForUpdate}
+          >
+            {controller.updateBusy
+              ? "检查中…"
+              : controller.updateInfo
+                ? `安装 ${controller.updateInfo.version}`
+                : "检查更新"}
+          </button>
+        ) : null}
       </footer>
 
       {deleteTarget ? (

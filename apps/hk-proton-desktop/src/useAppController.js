@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   connectApp,
+  checkForUpdate as checkForUpdateApp,
   disconnectApp,
   getAppStatus,
   importConfigFiles,
+  installLatestUpdate,
   deleteConfig,
   isDesktopRuntime,
   isStatusPayload,
@@ -25,6 +27,8 @@ export function useAppController() {
   const [pollError, setPollError] = useState(null);
   const [delays, setDelays] = useState({});
   const [testingDelayIds, setTestingDelayIds] = useState([]);
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
   const [desktopRuntime] = useState(() => isDesktopRuntime());
   const statusRef = useRef(INITIAL_STATUS);
   const revisionRef = useRef(INITIAL_STATUS.revision);
@@ -296,6 +300,56 @@ export function useAppController() {
     }
   }, []);
 
+  const checkForUpdate = useCallback(async () => {
+    if (operationActiveRef.current || speedTestActiveRef.current || updateBusy) return false;
+    setUpdateBusy(true);
+    setFeedback(null);
+    try {
+      const result = await checkForUpdateApp();
+      if (!result?.configured) {
+        setUpdateInfo(null);
+        setFeedback({ kind: "warning", message: "当前安装包尚未配置更新服务。" });
+        return false;
+      }
+      if (result.update) {
+        setUpdateInfo(result.update);
+        setFeedback({ kind: "success", message: `发现新版本 ${result.update.version}。` });
+      } else {
+        setUpdateInfo(null);
+        setFeedback({ kind: "success", message: "当前已经是最新版本。" });
+      }
+      return true;
+    } catch (error) {
+      setUpdateInfo(null);
+      setFeedback({ kind: "error", message: toUserMessage(error, "检查更新失败，请稍后重试。") });
+      return false;
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [updateBusy]);
+
+  const installUpdate = useCallback(async () => {
+    if (operationActiveRef.current || speedTestActiveRef.current || updateBusy) return false;
+    setUpdateBusy(true);
+    setFeedback(null);
+    try {
+      const result = await installLatestUpdate();
+      if (result) {
+        setUpdateInfo(null);
+        setFeedback({ kind: "success", message: `正在安装 ${result.version}，应用将自动退出。` });
+      } else {
+        setUpdateInfo(null);
+        setFeedback({ kind: "success", message: "当前已经是最新版本。" });
+      }
+      return Boolean(result);
+    } catch (error) {
+      setFeedback({ kind: "error", message: toUserMessage(error, "安装更新失败，请稍后重试。") });
+      return false;
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [updateBusy]);
+
   return {
     status,
     loading,
@@ -305,12 +359,16 @@ export function useAppController() {
     delays,
     testingDelayIds,
     testingDelays: testingDelayIds.length > 0,
+    updateInfo,
+    updateBusy,
     desktopRuntime,
     updateSelection,
     importConfigs,
     deleteProfile,
     switchMode,
     testDelays,
+    checkForUpdate,
+    installUpdate,
     connect,
     disconnect,
     clearFeedback: () => setFeedback(null),
