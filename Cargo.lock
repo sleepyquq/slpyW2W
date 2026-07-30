@@ -1472,7 +1472,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hk-proton-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "ipnet",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "hk-proton-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hk-proton-core",
  "hk-proton-manager",
@@ -1514,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "hk-proton-manager"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "fs2",

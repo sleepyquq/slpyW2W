@@ -1,6 +1,6 @@
 [package]
 name = "hk-proton-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "slpyW2W Windows desktop shell"
 edition.workspace = true
 license.workspace = true
