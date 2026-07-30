@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import { Check } from "@phosphor-icons/react/Check";
 import { CaretDown } from "@phosphor-icons/react/CaretDown";
 import { DotsThreeVertical } from "@phosphor-icons/react/DotsThreeVertical";
-import { Lightning } from "@phosphor-icons/react/Lightning";
 import { Trash } from "@phosphor-icons/react/Trash";
 import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { useAppController } from "./useAppController.js";
@@ -96,7 +95,7 @@ function ConnectionControl({ view, disabled, onConnect, onDisconnect }) {
   );
 }
 
-function ModeBar({ mode, disabled, hasExitNode, testing, onRequestMode, onTest }) {
+function ModeBar({ mode, disabled, hasExitNode, onRequestMode }) {
   return (
     <div className="mode-bar">
       <div className={`mode-switch${mode === "double" ? " is-double" : ""}`} aria-label="连接模式">
@@ -119,22 +118,13 @@ function ModeBar({ mode, disabled, hasExitNode, testing, onRequestMode, onTest }
           转发
         </button>
       </div>
-      <button
-        className={`speed-test-button${testing ? " is-testing" : ""}`}
-        type="button"
-        disabled={testing}
-        aria-label="测试节点延迟"
-        title="测试节点延迟"
-        onClick={onTest}
-      >
-        <Lightning aria-hidden="true" size={20} weight={testing ? "fill" : "regular"} />
-      </button>
     </div>
   );
 }
 
 function teamNodeRank(name) {
   if (name === "香港") return 0;
+  if (name === "香港2") return 1;
   const match = /^(台湾|新加坡)([CYZ]?)([123])$/.exec(name);
   if (!match) return Number.MAX_SAFE_INTEGER;
   const regionRank = match[1] === "台湾" ? 10 : 100;
@@ -149,9 +139,7 @@ function TeamNodeBar({
   testingIds,
   browseDisabled,
   selectionDisabled,
-  testing,
   onSelect,
-  onTest,
 }) {
   return (
     <section className="team-node-bar" aria-label="节点选择">
@@ -167,16 +155,6 @@ function TeamNodeBar({
         team
         onSelect={onSelect}
       />
-      <button
-        className={`speed-test-button${testing ? " is-testing" : ""}`}
-        type="button"
-        disabled={testing || browseDisabled}
-        aria-label="测试节点延迟"
-        title="测试节点延迟"
-        onClick={onTest}
-      >
-        <Lightning aria-hidden="true" size={21} weight={testing ? "fill" : "regular"} />
-      </button>
     </section>
   );
 }
@@ -474,7 +452,9 @@ export function App() {
   const firstHop = selectedName(controller.status.firstHops, controller.status.selectedFirstHop);
   const proton = selectedName(controller.status.protonNodes, controller.status.selectedProton);
   const teamProfiles = useMemo(() => {
-    const first = controller.status.firstHops.map((profile) => ({ ...profile, name: "香港" }));
+    const first = [...controller.status.firstHops]
+      .map((profile) => ({ ...profile }))
+      .sort((left, right) => teamNodeRank(left.name) - teamNodeRank(right.name));
     const exits = [...controller.status.protonNodes].sort((left, right) =>
       teamNodeRank(left.name) - teamNodeRank(right.name)
         || left.name.localeCompare(right.name, "zh-Hans-CN", { numeric: true }),
@@ -522,8 +502,11 @@ export function App() {
         selectedFirstHop: profileId,
       });
     }
+    const vlessHongKong = controller.status.firstHops.find((profile) => profile.name === "香港");
+    if (!vlessHongKong) return false;
     return controller.updateSelection({
       mode: "double",
+      selectedFirstHop: vlessHongKong.id,
       selectedProton: profileId,
     });
   };
@@ -562,9 +545,7 @@ export function App() {
           testingIds={testingIds}
           browseDisabled={teamBrowseDisabled}
           selectionDisabled={teamSelectionDisabled}
-          testing={controller.testingDelays}
           onSelect={requestTeamNode}
-          onTest={controller.testDelays}
         />
       ) : (
         <>
@@ -572,9 +553,7 @@ export function App() {
             mode={controller.status.mode}
             disabled={generalControlsDisabled}
             hasExitNode={controller.status.protonNodes.length > 0}
-            testing={controller.testingDelays}
             onRequestMode={requestMode}
-            onTest={controller.testDelays}
           />
           <section
             className={`config-list${controller.status.mode === "double" ? " has-exit" : ""}`}

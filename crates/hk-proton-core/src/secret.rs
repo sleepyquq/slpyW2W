@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 /// 会在释放时清零、且 `Debug`/`Display` 永远脱敏的字符串。
 ///
-/// 它可以序列化，是因为 Mihomo 运行时 YAML 必须包含 WireGuard 密钥；
+/// 它可以序列化，是因为 Mihomo 运行时 YAML 必须包含 WireGuard 密钥或 VLESS UUID；
 /// 调用者必须把生成文件放在受 ACL 保护的临时/运行目录中。
 #[derive(Clone)]
 pub struct SecretValue(Zeroizing<String>);

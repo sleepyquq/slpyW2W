@@ -5,17 +5,17 @@ slpyW2W is a Windows desktop client for WireGuard-to-WireGuard (W2W) forwarding.
 ## Traffic Modes
 
 ```text
-Direct:  Device → WireGuard relay → Destination
-Forward: Device → WireGuard relay → WireGuard exit → Destination
+Direct:  Device → WireGuard / VLESS hop → Destination
+Forward: Device → WireGuard / VLESS hop → WireGuard / VLESS exit → Destination
 ```
 
-The relay and exit are independent WireGuard configurations. Their DNS settings and routing roles are kept separate.
+The relay and exit are independent WireGuard or VLESS configurations. Their DNS settings and routing roles are kept separate.
 
 ## Requirements
 
 - Windows 10 or Windows 11 (64-bit)
 - Administrator permission for creating the TUN adapter
-- Valid WireGuard configuration files
+- Valid WireGuard `.conf` or VLESS URI / Mihomo YAML configuration files
 - Other software's TUN mode disabled before connecting
 
 slpyW2W manages only its own Mihomo process. It does not modify other proxy clients, the Windows system proxy, or firewall rules.
@@ -23,7 +23,7 @@ slpyW2W manages only its own Mihomo process. It does not modify other proxy clie
 ## Usage
 
 1. Start `slpyW2W.exe`.
-2. Use the configuration menu to import the required `.conf` files.
+2. Use the configuration menu to import the required `.conf`, `.txt`, `.yaml`, or `.yml` files.
 3. Select `Direct` for a single WireGuard hop or `Forward` for W2W forwarding.
 4. Select the relay node and, in forwarding mode, the exit node.
 5. Use the lightning button to test node latency if needed.
@@ -39,7 +39,15 @@ npm --prefix .\apps\hk-proton-desktop install
 .\scripts\package-portable.ps1
 ```
 
-The portable build is written to `release\slpyW2W\`. Mihomo is embedded in the executable and does not need to be distributed separately.
+The generic portable build is written to `release\slpyW2W\`. Mihomo is embedded in the executable and does not need to be distributed separately.
+
+The Pyxis customized installer is built with:
+
+```powershell
+.\scripts\package-pyxis.ps1 -ConfigRoot .\pyxis-vpn-conf
+```
+
+It writes an NSIS installer to `release\slpyW2W-pyxis-installer\`. The customized build includes five members and 51 embedded profiles. For the four original members, `香港` is the VLESS hop and `香港2` is the retained WireGuard direct option; selecting a Taiwan/Singapore node always uses `香港` as the relay.
 
 ## Configuration Safety
 

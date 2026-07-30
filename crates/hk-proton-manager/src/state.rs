@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use hk_proton_core::{
-    EndpointHost, ImportMetadata, OperatingMode, ProfileId, SecretValue, WireGuardConfig,
-    WireGuardInterface, WireGuardPeer,
+    EndpointHost, ImportMetadata, OperatingMode, ProfileId, SecretValue, VlessConfig, VlessNetwork,
+    WireGuardConfig, WireGuardInterface, WireGuardPeer,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -24,6 +24,7 @@ pub enum ProfileRole {
 pub enum SecretPurpose {
     WireGuardPrivateKey,
     WireGuardPresharedKey,
+    VlessUuid,
     RuntimeProfile,
     ManifestHmac,
 }
@@ -57,8 +58,18 @@ pub struct EndpointRecord {
     pub port: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProfileVersionKind {
+    #[default]
+    WireGuard,
+    Vless,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfileVersionRecord {
+    #[serde(default)]
+    pub kind: ProfileVersionKind,
     pub version_id: Uuid,
     pub imported_at: OffsetDateTime,
     pub config_version: u64,
@@ -66,12 +77,39 @@ pub struct ProfileVersionRecord {
     pub interface_addresses: Vec<String>,
     pub dns_servers: Vec<String>,
     pub mtu: Option<u16>,
-    pub private_key: SecretRef,
+    #[serde(default)]
+    pub private_key: Option<SecretRef>,
     pub endpoint: EndpointRecord,
-    pub public_key: String,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
     pub preshared_key: Option<SecretRef>,
+    #[serde(default)]
     pub allowed_ips: Vec<String>,
+    #[serde(default)]
     pub persistent_keepalive: Option<u16>,
+    #[serde(default)]
+    pub uuid: Option<SecretRef>,
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub udp: bool,
+    #[serde(default)]
+    pub tls: bool,
+    #[serde(default)]
+    pub flow: Option<String>,
+    #[serde(default)]
+    pub servername: Option<String>,
+    #[serde(default)]
+    pub client_fingerprint: Option<String>,
+    #[serde(default)]
+    pub packet_encoding: Option<String>,
+    #[serde(default)]
+    pub reality_public_key: Option<String>,
+    #[serde(default)]
+    pub reality_short_id: Option<String>,
+    #[serde(default)]
+    pub skip_cert_verify: bool,
 }
 
 impl ProfileVersionRecord {
@@ -110,6 +148,7 @@ impl ProfileVersionRecord {
 
         (
             Self {
+                kind: ProfileVersionKind::WireGuard,
                 version_id: Uuid::new_v4(),
                 imported_at: metadata.imported_at,
                 config_version: metadata.config_version,
@@ -120,18 +159,90 @@ impl ProfileVersionRecord {
                     .map(|item| item.to_string())
                     .collect(),
                 mtu,
-                private_key: private_key_ref,
+                private_key: Some(private_key_ref),
                 endpoint: EndpointRecord {
                     server: endpoint.server(),
                     port: endpoint.port,
                 },
-                public_key,
+                public_key: Some(public_key),
                 preshared_key: preshared_key_ref,
                 allowed_ips: allowed_ips
                     .into_iter()
                     .map(|item| item.to_string())
                     .collect(),
                 persistent_keepalive,
+                uuid: None,
+                network: None,
+                udp: false,
+                tls: false,
+                flow: None,
+                servername: None,
+                client_fingerprint: None,
+                packet_encoding: None,
+                reality_public_key: None,
+                reality_short_id: None,
+                skip_cert_verify: false,
+            },
+            pending,
+        )
+    }
+
+    pub fn from_vless(config: VlessConfig, metadata: ImportMetadata) -> (Self, Vec<PendingSecret>) {
+        let VlessConfig {
+            endpoint,
+            uuid,
+            network,
+            udp,
+            tls,
+            flow,
+            servername,
+            client_fingerprint,
+            packet_encoding,
+            reality_public_key,
+            reality_short_id,
+            skip_cert_verify,
+            dns_servers,
+        } = config;
+        let uuid_ref = SecretRef::random(SecretPurpose::VlessUuid);
+        let pending = vec![PendingSecret {
+            reference: uuid_ref.clone(),
+            value: uuid,
+        }];
+        (
+            Self {
+                kind: ProfileVersionKind::Vless,
+                version_id: Uuid::new_v4(),
+                imported_at: metadata.imported_at,
+                config_version: metadata.config_version,
+                source_sha256: metadata.source_sha256,
+                interface_addresses: Vec::new(),
+                dns_servers: dns_servers
+                    .into_iter()
+                    .map(|item| item.to_string())
+                    .collect(),
+                mtu: None,
+                private_key: None,
+                endpoint: EndpointRecord {
+                    server: endpoint.server(),
+                    port: endpoint.port,
+                },
+                public_key: None,
+                preshared_key: None,
+                allowed_ips: Vec::new(),
+                persistent_keepalive: None,
+                uuid: Some(uuid_ref),
+                network: Some(match network {
+                    VlessNetwork::Tcp => "tcp".to_owned(),
+                }),
+                udp,
+                tls,
+                flow,
+                servername,
+                client_fingerprint,
+                packet_encoding,
+                reality_public_key,
+                reality_short_id,
+                skip_cert_verify,
             },
             pending,
         )
@@ -142,8 +253,13 @@ impl ProfileVersionRecord {
         private_key: SecretValue,
         preshared_key: Option<SecretValue>,
     ) -> Result<WireGuardConfig> {
-        if self.private_key.purpose != SecretPurpose::WireGuardPrivateKey
-            || self.private_key.envelope_version != 1
+        let private_key_ref = self
+            .private_key
+            .as_ref()
+            .ok_or(ManagerError::SecretUnavailable)?;
+        if self.kind != ProfileVersionKind::WireGuard
+            || private_key_ref.purpose != SecretPurpose::WireGuardPrivateKey
+            || private_key_ref.envelope_version != 1
             || self.preshared_key.is_some() != preshared_key.is_some()
             || self.preshared_key.as_ref().is_some_and(|reference| {
                 reference.purpose != SecretPurpose::WireGuardPresharedKey
@@ -191,7 +307,10 @@ impl ProfileVersionRecord {
                 mtu: self.mtu,
             },
             peer: WireGuardPeer {
-                public_key: self.public_key.clone(),
+                public_key: self
+                    .public_key
+                    .clone()
+                    .ok_or_else(|| ManagerError::InvalidState("PublicKey 缺失".to_owned()))?,
                 preshared_key,
                 endpoint: hk_proton_core::Endpoint {
                     host,
@@ -201,6 +320,51 @@ impl ProfileVersionRecord {
                 persistent_keepalive: self.persistent_keepalive,
             },
         })
+    }
+
+    pub fn materialize_vless(&self, uuid: SecretValue) -> Result<VlessConfig> {
+        if self.kind != ProfileVersionKind::Vless
+            || self.uuid.as_ref().is_none_or(|reference| {
+                reference.purpose != SecretPurpose::VlessUuid || reference.envelope_version != 1
+            })
+        {
+            return Err(ManagerError::SecretUnavailable);
+        }
+        let network = match self.network.as_deref() {
+            Some("tcp") => VlessNetwork::Tcp,
+            _ => return Err(ManagerError::InvalidState("VLESS network 无效".to_owned())),
+        };
+        let host = self
+            .endpoint
+            .server
+            .parse()
+            .map(EndpointHost::Ip)
+            .unwrap_or_else(|_| EndpointHost::Domain(self.endpoint.server.clone()));
+        VlessConfig::checked(
+            hk_proton_core::Endpoint {
+                host,
+                port: self.endpoint.port,
+            },
+            uuid,
+            network,
+            self.udp,
+            self.tls,
+            self.flow.clone(),
+            self.servername.clone(),
+            self.client_fingerprint.clone(),
+            self.packet_encoding.clone(),
+            self.reality_public_key.clone(),
+            self.reality_short_id.clone(),
+            self.skip_cert_verify,
+            self.dns_servers
+                .iter()
+                .map(|item| {
+                    item.parse()
+                        .map_err(|_| ManagerError::InvalidState("DNS 无效".to_owned()))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .map_err(|_| ManagerError::InvalidState("VLESS 字段无效".to_owned()))
     }
 }
 
@@ -356,19 +520,46 @@ fn validate_resources(resources: &[ProfileResourceRecord], role: ProfileRole) ->
                     .source_sha256
                     .bytes()
                     .all(|byte| byte.is_ascii_hexdigit())
-                || version.interface_addresses.is_empty()
                 || version.dns_servers.is_empty()
-                || version.allowed_ips.is_empty()
                 || version.endpoint.port == 0
-                || version.private_key.purpose != SecretPurpose::WireGuardPrivateKey
-                || version.private_key.envelope_version != 1
-                || version.preshared_key.as_ref().is_some_and(|reference| {
-                    reference.purpose != SecretPurpose::WireGuardPresharedKey
-                        || reference.envelope_version != 1
-                })
                 || !valid_endpoint(&version.endpoint)
             {
-                return invalid("WireGuard 版本字段不完整");
+                return invalid("配置版本公共字段不完整");
+            }
+            match version.kind {
+                ProfileVersionKind::WireGuard => {
+                    if version.interface_addresses.is_empty()
+                        || version.allowed_ips.is_empty()
+                        || version.private_key.as_ref().is_none_or(|reference| {
+                            reference.purpose != SecretPurpose::WireGuardPrivateKey
+                                || reference.envelope_version != 1
+                        })
+                        || version.public_key.is_none()
+                        || version.preshared_key.as_ref().is_some_and(|reference| {
+                            reference.purpose != SecretPurpose::WireGuardPresharedKey
+                                || reference.envelope_version != 1
+                        })
+                    {
+                        return invalid("WireGuard 版本字段不完整");
+                    }
+                }
+                ProfileVersionKind::Vless => {
+                    if version.private_key.is_some()
+                        || version.public_key.is_some()
+                        || version.preshared_key.is_some()
+                        || !version.interface_addresses.is_empty()
+                        || !version.allowed_ips.is_empty()
+                        || version.network.as_deref() != Some("tcp")
+                        || version.uuid.as_ref().is_none_or(|reference| {
+                            reference.purpose != SecretPurpose::VlessUuid
+                                || reference.envelope_version != 1
+                        })
+                        || version.reality_public_key.is_some()
+                            != version.reality_short_id.is_some()
+                    {
+                        return invalid("VLESS 版本字段不完整");
+                    }
+                }
             }
         }
     }

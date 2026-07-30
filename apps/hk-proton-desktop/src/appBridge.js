@@ -97,7 +97,7 @@ export async function getAppStatus() {
 export async function activatePyxisMember(member) {
   if (isDesktopRuntime()) return invoke("activate_pyxis_member", { member });
   const normalized = String(member ?? "").trim().toLowerCase();
-  const allowed = new Set(["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna"]);
+  const allowed = new Set(["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna", "zhouwantong"]);
   if (!allowed.has(normalized)) throw { message: "未找到对应的团队配置。" };
   const owners = normalized === "zhenjiabao" ? ["C", "Y", "Z"] : [""];
   const protonNodes = owners.flatMap((owner) => [
@@ -112,13 +112,19 @@ export async function activatePyxisMember(member) {
       enabled: true,
     })),
   ]);
+  const firstHops = [
+    { id: `demo-${normalized}-hk-vless`, name: "香港", enabled: true },
+    ...(normalized === "zhouwantong"
+      ? []
+      : [{ id: `demo-${normalized}-hk-wireguard`, name: "香港2", enabled: true }]),
+  ];
   demoStatus = {
     ...demoStatus,
     configured: true,
     mode: "single",
-    firstHops: [{ id: `demo-${normalized}-hk`, name: "香港", enabled: true }],
+    firstHops,
     protonNodes,
-    selectedFirstHop: `demo-${normalized}-hk`,
+    selectedFirstHop: firstHops[0]?.id ?? null,
     selectedProton: protonNodes[0]?.id ?? null,
     runtimeState: "disconnected",
     canConnect: true,
@@ -153,7 +159,7 @@ export async function importConfigFiles(role) {
   const selected = await open({
     multiple: true,
     directory: false,
-    filters: [{ name: "WireGuard 配置", extensions: ["conf"] }],
+    filters: [{ name: "WireGuard / VLESS 配置", extensions: ["conf", "txt", "yaml", "yml"] }],
   });
   if (!selected) return { cancelled: true };
   const paths = Array.isArray(selected) ? selected : [selected];
@@ -192,9 +198,6 @@ export async function disconnectApp() {
 export async function measureNodeDelays() {
   if (isDesktopRuntime()) return invoke("measure_node_delays");
   await new Promise((resolve) => window.setTimeout(resolve, 900));
-  const profiles = demoStatus.mode === "double"
-    ? [...demoStatus.firstHops, ...demoStatus.protonNodes]
-    : demoStatus.firstHops;
   const demoDelays = {
     "demo-zurich": 48,
     "demo-hk": 184,
@@ -206,10 +209,14 @@ export async function measureNodeDelays() {
     "demo-proton-sg-2": 224,
     "demo-proton-us-1": 326,
   };
+  const selectedIds = [
+    demoStatus.selectedFirstHop,
+    demoStatus.mode === "double" ? demoStatus.selectedProton : null,
+  ].filter(Boolean);
   return {
-    results: profiles.map((profile) => ({
-      id: profile.id,
-      delayMs: demoDelays[profile.id] ?? null,
+    results: selectedIds.map((id) => ({
+      id,
+      delayMs: demoDelays[id] ?? null,
     })),
   };
 }
@@ -220,6 +227,7 @@ export function toUserMessage(error, fallback = "操作失败，请重试。") {
   if (/未配置|not configured/i.test(message)) return "请先导入配置。";
   if (/其他代理|冲突|conflict|networkactivation|\bTUN\b/i.test(message)) return "请关闭其他软件的 TUN 后重试。";
   if (/权限|permission|access denied/i.test(message)) return "请确认应用权限后重试。";
+  if (/域名.*解析|DNS/i.test(message)) return "成员配置已找到，但当前 DNS 无法解析线路服务器。";
   if (/配置.*无效|validation|invalid state|invalid config/i.test(message)) return "当前配置无法使用，请重新导入。";
   const looksSafe = message.length > 0 && message.length <= 96 && /[\u3400-\u9fff]/.test(message)
     && !/[\\/]|https?:|mihomo|dpapi|hmac|yaml|endpoint|stack trace/i.test(message);

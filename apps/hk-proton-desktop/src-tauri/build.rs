@@ -3,8 +3,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const PYXIS_MEMBERS: [&str; 4] = ["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna"];
-const EXPECTED_PYXIS_PROFILE_COUNT: usize = 40;
+const PYXIS_MEMBERS: [&str; 5] = [
+    "cheyuxuan",
+    "yanggengbo",
+    "zhenjiabao",
+    "zuoanna",
+    "zhouwantong",
+];
+const LEGACY_WIREGUARD_MEMBERS: [&str; 4] =
+    ["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna"];
+const EXPECTED_PYXIS_PROFILE_COUNT: usize = 51;
+const VLESS_SOURCE_RELATIVE_DIR: &str = "vless/HK-Xray-VLESS-10设备独立配置";
+
+const PYXIS_VLESS_FILES: [(&str, &str); 5] = [
+    ("zhenjiabao", "mihomo-device-01-zjb.yaml"),
+    ("zhouwantong", "mihomo-device-02-zwt.yaml"),
+    ("yanggengbo", "mihomo-device-03-ygb.yaml"),
+    ("zuoanna", "mihomo-device-04-zan.yaml"),
+    ("cheyuxuan", "mihomo-device-05-cyx.yaml"),
+];
 
 struct PyxisSource {
     member: String,
@@ -70,18 +87,33 @@ fn generate_pyxis_bundle() {
 
     let mut profiles = Vec::new();
     for member in PYXIS_MEMBERS {
-        let first_hop = source_root.join(format!("{member}.conf"));
+        let vless_file = source_root
+            .join(VLESS_SOURCE_RELATIVE_DIR)
+            .join(pyxis_vless_file_name(member));
         profiles.push(PyxisSource {
             member: member.to_owned(),
             role: "SourceRole::FirstHop",
             display_name: "香港".to_owned(),
-            contents: read_safe_source(&source_root, &first_hop),
+            contents: read_safe_source(&source_root, &vless_file),
         });
+
+        // 四位原成员的香港 WireGuard 保留为“香港2”直连节点；它不会被
+        // 前端选作第二跳链路的第一跳，第二跳始终固定使用上面的 VLESS 香港。
+        if LEGACY_WIREGUARD_MEMBERS.contains(&member) {
+            let legacy_first_hop = source_root.join(format!("{member}.conf"));
+            profiles.push(PyxisSource {
+                member: member.to_owned(),
+                role: "SourceRole::FirstHop",
+                display_name: "香港2".to_owned(),
+                contents: read_safe_source(&source_root, &legacy_first_hop),
+            });
+            println!("cargo:rerun-if-changed={}", legacy_first_hop.display());
+        }
 
         let proton_file = source_root.join(format!("{member}.txt"));
         let proton_source = read_safe_source(&source_root, &proton_file);
         profiles.extend(parse_pyxis_proton_profiles(member, &proton_source));
-        println!("cargo:rerun-if-changed={}", first_hop.display());
+        println!("cargo:rerun-if-changed={}", vless_file.display());
         println!("cargo:rerun-if-changed={}", proton_file.display());
     }
     assert_eq!(
@@ -94,7 +126,7 @@ fn generate_pyxis_bundle() {
     let mut generated =
         String::from("const EMBEDDED_PYXIS_PROFILES: &[EmbeddedPyxisProfile] = &[\n");
     for (index, profile) in profiles.iter().enumerate() {
-        let embedded_path = out_dir.join(format!("pyxis-profile-{index}.conf"));
+        let embedded_path = out_dir.join(format!("pyxis-profile-{index}.source"));
         assert!(
             !profile.contents.is_empty() && profile.contents.len() <= 256 * 1024,
             "pyxis 配置大小无效"
@@ -110,6 +142,13 @@ fn generate_pyxis_bundle() {
     }
     generated.push_str("];\n");
     fs::write(out_dir.join("pyxis_profiles.rs"), generated).expect("无法生成 pyxis 配置索引");
+}
+
+fn pyxis_vless_file_name(member: &str) -> &'static str {
+    PYXIS_VLESS_FILES
+        .iter()
+        .find_map(|(known_member, file_name)| (*known_member == member).then_some(*file_name))
+        .expect("pyxis 成员缺少 VLESS 配置映射")
 }
 
 fn read_safe_source(root: &Path, path: &Path) -> Vec<u8> {

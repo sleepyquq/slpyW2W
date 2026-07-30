@@ -5,9 +5,9 @@ use serde::Serialize;
 use zeroize::Zeroizing;
 
 use crate::{
-    ConfigError, FirstHopProfile, LanPolicy, OperatingMode, ProtonProfile, Result, RuntimeOptions,
-    RuntimeSelection, SecretValue, TailscalePolicy, ValidationReport, WireGuardConfig,
-    validate_rendered_profile,
+    ConfigError, FirstHopProfile, LanPolicy, OperatingMode, ProtonProfile, ProxyConfig, Result,
+    RuntimeOptions, RuntimeSelection, SecretValue, TailscalePolicy, ValidationReport, VlessConfig,
+    VlessNetwork, WireGuardConfig, validate_rendered_profile,
 };
 
 /// slpyW2W 独占的本机 DNS 监听端口，避开 Clash Verge 常用的 1053。
@@ -102,18 +102,18 @@ pub fn generate_profile(
 
     let mut proxies = Vec::with_capacity(enabled_first_hops.len() + enabled_protons.len());
     for node in &enabled_first_hops {
-        proxies.push(wireguard_proxy(
+        proxies.push(proxy_from_config(
             node.mihomo_name(),
-            &node.wireguard,
-            WireGuardRole::FirstHop,
+            &node.config,
+            Some(WireGuardRole::FirstHop),
             None,
         )?);
     }
     for node in &enabled_protons {
-        proxies.push(wireguard_proxy(
+        proxies.push(proxy_from_config(
             node.mihomo_name(),
-            &node.wireguard,
-            WireGuardRole::NestedProton,
+            &node.config,
+            Some(WireGuardRole::NestedProton),
             Some(FIRST_HOP_SELECTOR),
         )?);
     }
@@ -141,8 +141,8 @@ pub fn generate_profile(
     });
 
     let active_dns = match selected_proton {
-        Some(node) => ipv4_dns(&node.wireguard)?,
-        None => ipv4_dns(&selected_first_hop.wireguard)?,
+        Some(node) => config_dns(&node.config)?,
+        None => config_dns(&selected_first_hop.config)?,
     };
 
     let mut route_exclude_address = Vec::new();
@@ -159,16 +159,9 @@ pub fn generate_profile(
     }
     // 外层 WireGuard 握手必须从物理出口抵达第一跳；若也被 TUN 捕获会形成自环。
     // 只排除当前第一跳的精确主机地址，Proton 第二跳仍由 dialer-proxy 强制穿过第一跳。
-    route_exclude_address.push(endpoint_host_cidr(
-        selected_first_hop
-            .wireguard
-            .peer
-            .endpoint
-            .ip()
-            .ok_or(ConfigError::InvalidField {
-                field: "First-hop Endpoint",
-            })?,
-    ));
+    route_exclude_address.push(endpoint_host_cidr(first_hop_endpoint(
+        &selected_first_hop.config,
+    )?));
     route_exclude_address.sort();
     route_exclude_address.dedup();
 
@@ -248,35 +241,75 @@ fn ensure_unique_ids<'a>(ids: impl Iterator<Item = &'a str>, role: &str) -> Resu
 }
 
 fn validate_first_hop(node: &FirstHopProfile) -> Result<()> {
-    if node.wireguard.peer.endpoint.is_domain() {
-        return Err(ConfigError::FirstHopEndpointNeedsResolution);
-    }
-    validate_ipv4_wireguard(&node.wireguard)?;
-    Ok(())
+    validate_node_config(&node.config, true)
 }
 
 fn validate_proton(node: &ProtonProfile, selected_first_hop: &FirstHopProfile) -> Result<()> {
-    if node.wireguard.peer.endpoint.is_domain() {
-        return Err(ConfigError::ProtonEndpointNeedsResolution);
-    }
-    validate_ipv4_wireguard(&node.wireguard)?;
+    validate_node_config(&node.config, false)?;
 
-    let endpoint_ip = node
-        .wireguard
-        .peer
-        .endpoint
-        .ip()
-        .ok_or(ConfigError::ProtonEndpointNeedsResolution)?;
-    if !selected_first_hop
-        .wireguard
-        .peer
-        .allowed_ips
-        .iter()
-        .any(|cidr| cidr.contains(&endpoint_ip))
+    // 只有两跳均为 WireGuard 时，第二跳的 Endpoint 才必须落在第一跳的
+    // AllowedIPs 中。VLESS 或混合组合通过 Mihomo 的 dialer-proxy 建链。
+    if let (ProxyConfig::WireGuard(proton), ProxyConfig::WireGuard(first_hop)) =
+        (&node.config, &selected_first_hop.config)
     {
-        return Err(ConfigError::RuntimeValidation(
-            "所选第一跳的 AllowedIPs 不覆盖 Proton Endpoint".to_owned(),
-        ));
+        let endpoint_ip = proton
+            .peer
+            .endpoint
+            .ip()
+            .ok_or(ConfigError::ProtonEndpointNeedsResolution)?;
+        if !first_hop
+            .peer
+            .allowed_ips
+            .iter()
+            .any(|cidr| cidr.contains(&endpoint_ip))
+        {
+            return Err(ConfigError::RuntimeValidation(
+                "所选第一跳的 AllowedIPs 不覆盖 Proton Endpoint".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_node_config(config: &ProxyConfig, first_hop: bool) -> Result<()> {
+    match config {
+        ProxyConfig::WireGuard(wireguard) => {
+            if wireguard.peer.endpoint.is_domain() {
+                return Err(if first_hop {
+                    ConfigError::FirstHopEndpointNeedsResolution
+                } else {
+                    ConfigError::ProtonEndpointNeedsResolution
+                });
+            }
+            validate_ipv4_wireguard(wireguard)
+        }
+        ProxyConfig::Vless(vless) => validate_vless(vless, first_hop),
+    }
+}
+
+fn validate_vless(config: &VlessConfig, first_hop: bool) -> Result<()> {
+    if config.endpoint.is_domain() {
+        return Err(if first_hop {
+            ConfigError::FirstHopEndpointNeedsResolution
+        } else {
+            ConfigError::ProtonEndpointNeedsResolution
+        });
+    }
+    if config.endpoint.ip().is_none_or(|ip| !ip.is_ipv4()) {
+        return Err(ConfigError::InvalidField {
+            field: "VLESS IPv4 Endpoint",
+        });
+    }
+    if !matches!(config.network, VlessNetwork::Tcp)
+        || uuid::Uuid::parse_str(config.uuid.expose_secret()).is_err()
+        || config.dns_servers.is_empty()
+        || config.dns_servers.iter().any(|ip| !ip.is_ipv4())
+        || config.reality_public_key.is_some() != config.reality_short_id.is_some()
+        || (config.reality_public_key.is_some() && !config.tls)
+    {
+        return Err(ConfigError::InvalidField {
+            field: "VLESS 配置",
+        });
     }
     Ok(())
 }
@@ -337,6 +370,29 @@ fn covers_all_ipv4(networks: &[IpNet]) -> bool {
         covered_to = covered_to.max(end);
     }
     covered_to == u32::MAX
+}
+
+fn proxy_from_config(
+    name: String,
+    config: &ProxyConfig,
+    wireguard_role: Option<WireGuardRole>,
+    dialer_proxy: Option<&'static str>,
+) -> Result<GeneratedProxy> {
+    match config {
+        ProxyConfig::WireGuard(wireguard) => Ok(GeneratedProxy::WireGuard(wireguard_proxy(
+            name,
+            wireguard,
+            wireguard_role.ok_or(ConfigError::RuntimeValidation(
+                "WireGuard 节点缺少运行角色".to_owned(),
+            ))?,
+            dialer_proxy,
+        )?)),
+        ProxyConfig::Vless(vless) => Ok(GeneratedProxy::Vless(vless_proxy(
+            name,
+            vless,
+            dialer_proxy,
+        )?)),
+    }
 }
 
 fn wireguard_proxy(
@@ -403,6 +459,78 @@ fn wireguard_proxy(
             .map(|server| server.to_string())
             .collect(),
     })
+}
+
+fn vless_proxy(
+    name: String,
+    source: &VlessConfig,
+    dialer_proxy: Option<&'static str>,
+) -> Result<VlessProxy> {
+    let endpoint_ip =
+        source
+            .endpoint
+            .ip()
+            .filter(IpAddr::is_ipv4)
+            .ok_or(ConfigError::InvalidField {
+                field: "VLESS IPv4 Endpoint",
+            })?;
+    Ok(VlessProxy {
+        name,
+        kind: "vless",
+        server: endpoint_ip.to_string(),
+        port: source.endpoint.port,
+        udp: source.udp,
+        uuid: source.uuid.clone(),
+        flow: source.flow.clone(),
+        tls: source.tls,
+        servername: source.servername.clone(),
+        client_fingerprint: source.client_fingerprint.clone(),
+        packet_encoding: source.packet_encoding.clone(),
+        skip_cert_verify: source.skip_cert_verify,
+        reality_opts: source
+            .reality_public_key
+            .clone()
+            .zip(source.reality_short_id.clone())
+            .map(|(public_key, short_id)| RealityOptions {
+                public_key,
+                short_id,
+            }),
+        network: match source.network {
+            VlessNetwork::Tcp => "tcp",
+        },
+        dialer_proxy,
+    })
+}
+
+fn config_dns(config: &ProxyConfig) -> Result<Vec<IpAddr>> {
+    match config {
+        ProxyConfig::WireGuard(wireguard) => ipv4_dns(wireguard),
+        ProxyConfig::Vless(vless) => {
+            let servers: Vec<_> = vless
+                .dns_servers
+                .iter()
+                .copied()
+                .filter(IpAddr::is_ipv4)
+                .collect();
+            if servers.is_empty() {
+                return Err(ConfigError::MissingEgressDns);
+            }
+            Ok(servers)
+        }
+    }
+}
+
+fn first_hop_endpoint(config: &ProxyConfig) -> Result<IpAddr> {
+    let endpoint = match config {
+        ProxyConfig::WireGuard(wireguard) => &wireguard.peer.endpoint,
+        ProxyConfig::Vless(vless) => &vless.endpoint,
+    };
+    endpoint
+        .ip()
+        .filter(IpAddr::is_ipv4)
+        .ok_or(ConfigError::InvalidField {
+            field: "First-hop IPv4 Endpoint",
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -513,7 +641,7 @@ struct MihomoConfig {
     profile: ProfileOptions,
     tun: TunConfig,
     dns: DnsConfig,
-    proxies: Vec<WireGuardProxy>,
+    proxies: Vec<GeneratedProxy>,
     proxy_groups: Vec<ProxyGroup>,
     rules: Vec<String>,
 }
@@ -580,6 +708,53 @@ struct WireGuardProxy {
     dialer_proxy: Option<&'static str>,
     remote_dns_resolve: bool,
     dns: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+#[serde(rename_all = "kebab-case")]
+enum GeneratedProxy {
+    WireGuard(WireGuardProxy),
+    Vless(VlessProxy),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct VlessProxy {
+    name: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    server: String,
+    port: u16,
+    udp: bool,
+    uuid: SecretValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flow: Option<String>,
+    tls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    servername: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packet_encoding: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    skip_cert_verify: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reality_opts: Option<RealityOptions>,
+    network: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialer_proxy: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct RealityOptions {
+    public_key: String,
+    short_id: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Serialize)]

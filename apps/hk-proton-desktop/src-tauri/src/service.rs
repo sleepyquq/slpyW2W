@@ -1,14 +1,20 @@
-use std::{collections::BTreeMap, net::IpAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, ToSocketAddrs},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use hk_proton_core::{
-    FIRST_HOP_SELECTOR, FirstHopProfile, HK_PROTON_DNS_PORT, ImportMetadata, LanPolicy,
-    OUTLET_SELECTOR, OperatingMode, PROTON_SELECTOR, ProfileId, ProtonProfile, RuntimeOptions,
-    RuntimeSelection, SecretValue, TailscalePolicy, WireGuardConfig, generate_profile,
+    Endpoint, EndpointHost, FIRST_HOP_SELECTOR, FirstHopProfile, HK_PROTON_DNS_PORT,
+    ImportMetadata, LanPolicy, OUTLET_SELECTOR, OperatingMode, PROTON_SELECTOR, ProfileId,
+    ProtonProfile, ProxyConfig, RuntimeOptions, RuntimeSelection, SecretValue, TailscalePolicy,
+    VlessConfig, WireGuardConfig, generate_profile, looks_like_vless_source, parse_vless,
     parse_wireguard, validate_rendered_profile,
 };
 use hk_proton_manager::{
     AppState, GenerationCandidate, LanPolicyRecord, PendingSecret, ProfileResourceRecord,
-    ProfileRole, ProfileVersionRecord, SecretProtector, SecretRef, StateStore,
+    ProfileRole, ProfileVersionKind, ProfileVersionRecord, SecretProtector, SecretRef, StateStore,
     TailscalePolicyRecord, inspect_network_effects,
 };
 use ipnet::IpNet;
@@ -62,7 +68,12 @@ impl AppService<DpapiCurrentUserProtector, crate::live_runtime::LiveRuntime> {
             store,
             runtime,
         };
-        service.refresh_runtime_contract_if_needed()?;
+        // 旧版本状态可能仍保存域名 Endpoint，运行合同刷新需要依赖当前 DNS。
+        // 刷新失败不能阻止 GUI 启动；Pyxis 首次输入成员名时会从内置配置
+        // 重新构造完整状态，普通版也可以通过重新导入配置恢复。
+        if let Err(error) = service.refresh_runtime_contract_if_needed() {
+            eprintln!("启动时刷新旧运行状态失败: {error:?}");
+        }
         Ok(service)
     }
 }
@@ -82,8 +93,8 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
         self.status_with_runtime(runtime)
     }
 
-    /// 用户首次输入团队名字后，只把该成员可用的内置配置写入当前用户 DPAPI Vault。
-    /// 相同成员再次启动时保持已有选择；切换成员时以一次候选验证和原子提交替换资源集合。
+    /// 首次输入成员名时，只把该成员的 VLESS 香港、可选的香港2 WireGuard，
+    /// 以及对应的第二跳节点写入当前用户的 DPAPI Vault。
     #[cfg(feature = "pyxis")]
     pub fn activate_pyxis_member(&mut self, member: String) -> ServiceResult<AppStatusDto> {
         if self.runtime.is_active() {
@@ -93,29 +104,43 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
         let sources = scan_embedded_pyxis_profiles(&member)?;
         let mut imports = Vec::with_capacity(sources.len());
         for source in sources {
-            let parsed = parse_wireguard(source.contents.as_str())
-                .map_err(|_| ServiceError::InvalidWireGuard)?;
+            let ParsedSource {
+                config,
+                source_sha256,
+            } = parse_source(source.contents.as_str())?;
             imports.push(ParsedImport {
                 role: source.role,
                 id: source.id,
                 display_name: source.display_name,
-                config: parsed.config,
-                source_sha256: parsed.source_sha256,
+                config,
+                source_sha256,
             });
         }
 
         let current = self.store.load_current()?;
-        if current
-            .as_ref()
-            .is_some_and(|generation| state_matches_embedded(&generation.state, &imports))
-        {
+        let current_matches = current.as_ref().is_some_and(|generation| {
+            state_matches_embedded(&generation.state, &imports)
+                && (generation.state.mode != OperatingMode::DoubleHop
+                    || generation
+                        .state
+                        .first_hops
+                        .iter()
+                        .find(|item| item.id == generation.state.selected_first_hop)
+                        .is_some_and(|item| item.display_name == "香港"))
+        });
+        if current_matches {
             return self.get_app_status();
         }
 
         let expected_revision = current.as_ref().map(|generation| generation.state.revision);
         let (mut state, pending) = merge_imports(None, imports, OffsetDateTime::now_utc())?;
-        // 团队版首次进入默认选中“香港”；选择其他节点时再由前端原子切换到双跳。
         state.mode = OperatingMode::SingleHop;
+        state.selected_first_hop = state
+            .first_hops
+            .iter()
+            .find(|item| item.enabled && item.display_name == "香港")
+            .map(|item| item.id.clone())
+            .ok_or(ServiceError::MissingFirstHop)?;
         let candidate = self.build_candidate(state, pending)?;
         self.store.commit(candidate, expected_revision)?;
         let runtime = self.runtime.configuration_changed();
@@ -157,14 +182,16 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
         let sources = scan_config_tree(&self.source_root)?;
         let mut imports = Vec::with_capacity(sources.len());
         for source in sources {
-            let parsed = parse_wireguard(source.contents.as_str())
-                .map_err(|_| ServiceError::InvalidWireGuard)?;
+            let ParsedSource {
+                config,
+                source_sha256,
+            } = parse_source(source.contents.as_str())?;
             imports.push(ParsedImport {
                 role: source.role,
                 id: source.id,
                 display_name: source.display_name,
-                config: parsed.config,
-                source_sha256: parsed.source_sha256,
+                config,
+                source_sha256,
             });
         }
 
@@ -198,14 +225,16 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
         let sources = scan_selected_files(source_role, &paths)?;
         let mut imports = Vec::with_capacity(sources.len());
         for source in sources {
-            let parsed = parse_wireguard(source.contents.as_str())
-                .map_err(|_| ServiceError::InvalidWireGuard)?;
+            let ParsedSource {
+                config,
+                source_sha256,
+            } = parse_source(source.contents.as_str())?;
             imports.push(ParsedImport {
                 role: source.role,
                 id: source.id,
                 display_name: source.display_name,
-                config: parsed.config,
-                source_sha256: parsed.source_sha256,
+                config,
+                source_sha256,
             });
         }
 
@@ -309,6 +338,21 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
             return Err(ServiceError::InvalidSelection);
         }
 
+        #[cfg(feature = "pyxis")]
+        if state
+            .first_hops
+            .iter()
+            .any(|item| item.display_name == "香港2")
+            && mode == UiMode::Double
+            && !state
+                .first_hops
+                .iter()
+                .any(|item| item.id == first_hop && item.enabled && item.display_name == "香港")
+        {
+            // 定制版的“香港2”只允许直连；第二跳必须固定经由 VLESS 香港。
+            return Err(ServiceError::InvalidSelection);
+        }
+
         let requested_proton = selected_proton
             .map(ProfileId::new)
             .transpose()
@@ -390,33 +434,33 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
             .store
             .load_current()?
             .ok_or(ServiceError::Unconfigured)?;
-        let mut targets = current
+        // 测速只服务于当前连接路径：不再扫描全部节点，避免一次操作触发大量探测。
+        let selected_first_hop = current
             .state
             .first_hops
             .iter()
-            .filter(|item| item.enabled)
-            .map(|item| NodeDelayTarget {
-                profile_id: item.id.to_string(),
-                proxy_name: format!("FH-{}", item.id),
-            })
-            .collect::<Vec<_>>();
-        // 团队定制版只有一个统一节点列表，未连接且当前选中香港时也要能测试全部出口。
-        #[cfg(feature = "pyxis")]
-        let include_proton = true;
-        #[cfg(not(feature = "pyxis"))]
-        let include_proton = current.state.mode == OperatingMode::DoubleHop;
-        if include_proton {
-            targets.extend(
-                current
-                    .state
-                    .proton_nodes
-                    .iter()
-                    .filter(|item| item.enabled)
-                    .map(|item| NodeDelayTarget {
-                        profile_id: item.id.to_string(),
-                        proxy_name: format!("PN-{}", item.id),
-                    }),
-            );
+            .find(|item| item.id == current.state.selected_first_hop && item.enabled)
+            .ok_or(ServiceError::StateUnavailable)?;
+        let mut targets = vec![NodeDelayTarget {
+            profile_id: selected_first_hop.id.to_string(),
+            proxy_name: format!("FH-{}", selected_first_hop.id),
+        }];
+        if current.state.mode == OperatingMode::DoubleHop {
+            let selected_proton_id = current
+                .state
+                .selected_proton
+                .as_ref()
+                .ok_or(ServiceError::StateUnavailable)?;
+            let selected_proton = current
+                .state
+                .proton_nodes
+                .iter()
+                .find(|item| &item.id == selected_proton_id && item.enabled)
+                .ok_or(ServiceError::StateUnavailable)?;
+            targets.push(NodeDelayTarget {
+                profile_id: selected_proton.id.to_string(),
+                proxy_name: format!("PN-{}", selected_proton.id),
+            });
         }
         let results = self
             .runtime
@@ -476,13 +520,21 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
             let version = resource
                 .current_version()
                 .ok_or(ServiceError::StateUnavailable)?;
-            let wireguard = materialize_version(self.store.as_ref(), &pending, version)?;
-            let mut profile = FirstHopProfile::new(
-                resource.id.clone(),
-                resource.display_name.clone(),
-                wireguard,
-                metadata_from_version(version),
-            )
+            let config = materialize_version(self.store.as_ref(), &pending, version)?;
+            let mut profile = match config {
+                ProxyConfig::WireGuard(wireguard) => FirstHopProfile::new(
+                    resource.id.clone(),
+                    resource.display_name.clone(),
+                    wireguard,
+                    metadata_from_version(version),
+                ),
+                ProxyConfig::Vless(vless) => FirstHopProfile::new_vless(
+                    resource.id.clone(),
+                    resource.display_name.clone(),
+                    vless,
+                    metadata_from_version(version),
+                ),
+            }
             .map_err(|_| ServiceError::GeneratedProfileInvalid)?;
             profile.enabled = resource.enabled;
             first_hops.push(profile);
@@ -493,13 +545,21 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
             let version = resource
                 .current_version()
                 .ok_or(ServiceError::StateUnavailable)?;
-            let wireguard = materialize_version(self.store.as_ref(), &pending, version)?;
-            let mut profile = ProtonProfile::new(
-                resource.id.clone(),
-                resource.display_name.clone(),
-                wireguard,
-                metadata_from_version(version),
-            )
+            let config = materialize_version(self.store.as_ref(), &pending, version)?;
+            let mut profile = match config {
+                ProxyConfig::WireGuard(wireguard) => ProtonProfile::new(
+                    resource.id.clone(),
+                    resource.display_name.clone(),
+                    wireguard,
+                    metadata_from_version(version),
+                ),
+                ProxyConfig::Vless(vless) => ProtonProfile::new_vless(
+                    resource.id.clone(),
+                    resource.display_name.clone(),
+                    vless,
+                    metadata_from_version(version),
+                ),
+            }
             .map_err(|_| ServiceError::GeneratedProfileInvalid)?;
             profile.enabled = resource.enabled;
             proton_nodes.push(profile);
@@ -556,7 +616,17 @@ struct ParsedImport {
     role: SourceRole,
     id: String,
     display_name: String,
-    config: WireGuardConfig,
+    config: ImportedConfig,
+    source_sha256: String,
+}
+
+enum ImportedConfig {
+    WireGuard(WireGuardConfig),
+    Vless(VlessConfig),
+}
+
+struct ParsedSource {
+    config: ImportedConfig,
     source_sha256: String,
 }
 
@@ -570,7 +640,8 @@ fn state_matches_embedded(state: &AppState, imports: &[ParsedImport]) -> bool {
         .iter()
         .filter(|item| item.role == SourceRole::Proton)
         .count();
-    if state.first_hops.len() != expected_first_hops || state.proton_nodes.len() != expected_proton
+    if state.first_hops.len() != expected_first_hops
+        || state.proton_nodes.len() != expected_proton
     {
         return false;
     }
@@ -588,6 +659,96 @@ fn state_matches_embedded(state: &AppState, imports: &[ParsedImport]) -> bool {
                     .is_some_and(|version| version.source_sha256 == item.source_sha256)
         })
     })
+}
+
+fn parse_source(source: &str) -> ServiceResult<ParsedSource> {
+    if looks_like_vless_source(source) {
+        let parsed = parse_vless(source).map_err(|_| ServiceError::InvalidConfiguration)?;
+        Ok(ParsedSource {
+            config: ImportedConfig::Vless(resolve_vless_endpoint(parsed.config)?),
+            source_sha256: parsed.source_sha256,
+        })
+    } else {
+        let parsed = parse_wireguard(source).map_err(|_| ServiceError::InvalidConfiguration)?;
+        Ok(ParsedSource {
+            config: ImportedConfig::WireGuard(resolve_wireguard_endpoint(parsed.config)?),
+            source_sha256: parsed.source_sha256,
+        })
+    }
+}
+
+/// 将 WireGuard 的域名 Endpoint 固定为 IPv4，避免 TUN 接管后旧版“香港2”
+/// 直连节点的自身建链也被捕获。第二跳现有配置通常已经是 IPv4，这里只在
+/// 确实遇到域名时执行解析。
+fn resolve_wireguard_endpoint(config: WireGuardConfig) -> ServiceResult<WireGuardConfig> {
+    let Some(host) = (match &config.peer.endpoint.host {
+        EndpointHost::Domain(domain) => Some(domain.clone()),
+        EndpointHost::Ip(_) => None,
+    }) else {
+        return Ok(config);
+    };
+    let port = config.peer.endpoint.port;
+    let ip = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|_| ServiceError::EndpointResolutionFailed)?
+        .find_map(|address| match address.ip() {
+            IpAddr::V4(ip) => Some(IpAddr::V4(ip)),
+            IpAddr::V6(_) => None,
+        })
+        .ok_or(ServiceError::EndpointResolutionFailed)?;
+    let mut peer = config.peer;
+    peer.endpoint = Endpoint {
+        host: EndpointHost::Ip(ip),
+        port,
+    };
+    Ok(WireGuardConfig {
+        interface: config.interface,
+        peer,
+    })
+}
+
+/// 在候选 generation 阶段把 VLESS 的域名 Endpoint 固定成 IPv4，避免 TUN
+/// 捕获第一跳自身的域名解析或建立连接。TLS/Reality 未显式提供 SNI 时，保留
+/// 原始域名作为 servername；解析只发生在用户导入或重新生成候选时。
+fn resolve_vless_endpoint(config: VlessConfig) -> ServiceResult<VlessConfig> {
+    let Some(host) = (match &config.endpoint.host {
+        EndpointHost::Domain(domain) => Some(domain.clone()),
+        EndpointHost::Ip(_) => None,
+    }) else {
+        return Ok(config);
+    };
+    let port = config.endpoint.port;
+    let ip = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|_| ServiceError::EndpointResolutionFailed)?
+        .find_map(|address| match address.ip() {
+            IpAddr::V4(ip) => Some(IpAddr::V4(ip)),
+            IpAddr::V6(_) => None,
+        })
+        .ok_or(ServiceError::EndpointResolutionFailed)?;
+    let servername = config
+        .servername
+        .clone()
+        .or_else(|| config.tls.then_some(host));
+    VlessConfig::checked(
+        Endpoint {
+            host: EndpointHost::Ip(ip),
+            port,
+        },
+        config.uuid,
+        config.network,
+        config.udp,
+        config.tls,
+        config.flow,
+        servername,
+        config.client_fingerprint,
+        config.packet_encoding,
+        config.reality_public_key,
+        config.reality_short_id,
+        config.skip_cert_verify,
+        config.dns_servers,
+    )
+    .map_err(|_| ServiceError::InvalidConfiguration)
 }
 
 fn merge_imports(
@@ -742,7 +903,7 @@ fn apply_import(
             .checked_add(1)
             .ok_or(ServiceError::StateUnavailable)?;
         let metadata = ImportMetadata::new(imported_at, config_version, import.source_sha256);
-        let (version, secrets) = ProfileVersionRecord::from_wireguard(import.config, metadata);
+        let (version, secrets) = profile_version_from_import(import.config, metadata);
         existing.current_version_id = version.version_id;
         existing.versions.push(version);
         pending.extend(secrets);
@@ -750,7 +911,7 @@ fn apply_import(
     }
 
     let metadata = ImportMetadata::new(imported_at, 1, import.source_sha256);
-    let (version, secrets) = ProfileVersionRecord::from_wireguard(import.config, metadata);
+    let (version, secrets) = profile_version_from_import(import.config, metadata);
     let current_version_id = version.version_id;
     resources.push(ProfileResourceRecord {
         id,
@@ -764,20 +925,50 @@ fn apply_import(
     Ok(())
 }
 
+fn profile_version_from_import(
+    config: ImportedConfig,
+    metadata: ImportMetadata,
+) -> (ProfileVersionRecord, Vec<PendingSecret>) {
+    match config {
+        ImportedConfig::WireGuard(config) => ProfileVersionRecord::from_wireguard(config, metadata),
+        ImportedConfig::Vless(config) => ProfileVersionRecord::from_vless(config, metadata),
+    }
+}
+
 fn materialize_version<P: SecretProtector>(
     store: &StateStore<P>,
     pending: &BTreeMap<Uuid, &PendingSecret>,
     version: &ProfileVersionRecord,
-) -> ServiceResult<WireGuardConfig> {
-    let private_key = resolve_secret(store, pending, &version.private_key)?;
-    let preshared_key = version
-        .preshared_key
-        .as_ref()
-        .map(|reference| resolve_secret(store, pending, reference))
-        .transpose()?;
-    version
-        .materialize(private_key, preshared_key)
-        .map_err(|_| ServiceError::StateUnavailable)
+) -> ServiceResult<ProxyConfig> {
+    match version.kind {
+        ProfileVersionKind::WireGuard => {
+            let private_key = version
+                .private_key
+                .as_ref()
+                .ok_or(ServiceError::StateUnavailable)
+                .and_then(|reference| resolve_secret(store, pending, reference))?;
+            let preshared_key = version
+                .preshared_key
+                .as_ref()
+                .map(|reference| resolve_secret(store, pending, reference))
+                .transpose()?;
+            version
+                .materialize(private_key, preshared_key)
+                .map(ProxyConfig::WireGuard)
+                .map_err(|_| ServiceError::StateUnavailable)
+        }
+        ProfileVersionKind::Vless => {
+            let uuid_ref = version
+                .uuid
+                .as_ref()
+                .ok_or(ServiceError::StateUnavailable)?;
+            let uuid = resolve_secret(store, pending, uuid_ref)?;
+            version
+                .materialize_vless(uuid)
+                .map(ProxyConfig::Vless)
+                .map_err(|_| ServiceError::StateUnavailable)
+        }
+    }
 }
 
 fn resolve_secret<P: SecretProtector>(
@@ -874,6 +1065,7 @@ mod tests {
     use std::fs;
 
     use hk_proton_manager::{Result as ManagerResult, SecretProtector, SecretRef};
+    use serde_yaml_ng::Value;
     use tempfile::TempDir;
 
     use super::*;
@@ -885,6 +1077,26 @@ mod tests {
     );
     const PROTON: &str =
         include_str!("../../../../crates/hk-proton-core/tests/fixtures/proton-jp.synthetic.conf");
+    const VLESS_URI: &str = "vless://55555555-5555-4555-8555-555555555555@203.0.113.47:443?encryption=none&security=reality&sni=example.com&fp=chrome&pbk=9gtLPpU_IgqbuGMC4RQb_hNAK5kil8sHHeaELn1_-z8&sid=01020304&flow=xtls-rprx-vision&type=tcp&packetencoding=xudp&udp=1#synthetic";
+    const VLESS_YAML: &str = r#"
+proxies:
+  - name: synthetic-vless-yaml
+    type: vless
+    server: 203.0.113.48
+    port: 443
+    uuid: 66666666-6666-4666-8666-666666666666
+    encryption: ""
+    udp: true
+    tls: true
+    flow: xtls-rprx-vision
+    packet-encoding: xudp
+    servername: example.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: 9gtLPpU_IgqbuGMC4RQb_hNAK5kil8sHHeaELn1_-z8
+      short-id: 01020304
+    network: tcp
+"#;
 
     struct TestProtector;
 
@@ -930,6 +1142,46 @@ mod tests {
             let value = String::from_utf8(value.to_vec())
                 .map_err(|_| hk_proton_manager::ManagerError::SecretProtection)?;
             Ok(SecretValue::new(value))
+        }
+    }
+
+    #[cfg(feature = "pyxis")]
+    #[test]
+    fn pyxis_embedded_profiles_match_member_and_hop_contract() {
+        let cases = [
+            ("cheyuxuan", 8_usize, 2_usize),
+            ("yanggengbo", 8, 2),
+            ("zhenjiabao", 20, 2),
+            ("zuoanna", 8, 2),
+            ("zhouwantong", 7, 1),
+        ];
+        for (member, expected_total, expected_first_hops) in cases {
+            let sources = scan_embedded_pyxis_profiles(member).unwrap();
+            assert_eq!(sources.len(), expected_total);
+            let first_hops = sources
+                .iter()
+                .filter(|source| source.role == SourceRole::FirstHop)
+                .collect::<Vec<_>>();
+            assert_eq!(first_hops.len(), expected_first_hops);
+            assert_eq!(
+                first_hops
+                    .iter()
+                    .filter(|source| source.display_name == "香港")
+                    .count(),
+                1
+            );
+            for source in sources {
+                match (source.role, source.display_name.as_str()) {
+                    (SourceRole::FirstHop, "香港") => {
+                        assert!(parse_vless(source.contents.as_str()).is_ok());
+                    }
+                    (SourceRole::FirstHop, "香港2")
+                    | (SourceRole::Proton, _) => {
+                        assert!(parse_wireguard(source.contents.as_str()).is_ok());
+                    }
+                    (SourceRole::FirstHop, _) => panic!("未知的 Pyxis 第一跳命名"),
+                }
+            }
         }
     }
 
@@ -986,7 +1238,17 @@ mod tests {
             .import_config_files(UiProfileRole::Proton, vec![proton])
             .unwrap();
         assert_eq!(double.proton_nodes[0].display_name, "日本-JP-1");
+        let double = service
+            .update_selection(
+                UiMode::Double,
+                double.selected_first_hop.clone().unwrap(),
+                double.selected_proton.clone(),
+            )
+            .unwrap();
+        assert_eq!(double.mode, UiMode::Double);
         let proton_id = double.selected_proton.unwrap();
+        let double_delay_report = service.measure_node_delays().unwrap();
+        assert_eq!(double_delay_report.results.len(), 2);
         let deleted = service
             .delete_profile(UiProfileRole::Proton, proton_id)
             .unwrap();
@@ -1000,6 +1262,61 @@ mod tests {
         let delay_report = service.measure_node_delays().unwrap();
         assert_eq!(delay_report.results.len(), 1);
         assert_eq!(delay_report.results[0].delay_ms, Some(4));
+    }
+
+    #[test]
+    fn imports_vless_uri_and_mihomo_yaml_for_both_hop_roles() {
+        let vault = TempDir::new().unwrap();
+        let first_path = vault.path().join("first-hop.txt");
+        let proton_path = vault.path().join("second-hop.yaml");
+        fs::write(&first_path, VLESS_URI).unwrap();
+        fs::write(&proton_path, VLESS_YAML).unwrap();
+
+        let store_root = TempDir::new().unwrap();
+        let store = StateStore::open(store_root.path(), TestProtector).unwrap();
+        let mut service = AppService::with_store(PathBuf::new(), store, FailClosedRuntime::new());
+        let single = service
+            .import_config_files(UiProfileRole::FirstHop, vec![first_path])
+            .unwrap();
+        assert_eq!(single.mode, UiMode::Single);
+        let double = service
+            .import_config_files(UiProfileRole::Proton, vec![proton_path])
+            .unwrap();
+        assert_eq!(double.mode, UiMode::Single);
+        assert_eq!(double.first_hops.len(), 1);
+        assert_eq!(double.proton_nodes.len(), 1);
+        let double = service
+            .update_selection(
+                UiMode::Double,
+                double.selected_first_hop.clone().unwrap(),
+                double.selected_proton.clone(),
+            )
+            .unwrap();
+        assert_eq!(double.mode, UiMode::Double);
+
+        let runtime = service.store.load_runtime_yaml(double.revision).unwrap();
+        let yaml: Value = serde_yaml_ng::from_str(runtime.expose_secret()).unwrap();
+        let proxies = yaml["proxies"].as_sequence().unwrap();
+        assert!(
+            proxies
+                .iter()
+                .all(|proxy| proxy["type"].as_str() == Some("vless"))
+        );
+        assert!(
+            proxies
+                .iter()
+                .all(|proxy| proxy["packet-encoding"].as_str() == Some("xudp"))
+        );
+        assert_eq!(
+            proxies
+                .iter()
+                .find(|proxy| proxy["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("PN-"))
+                .and_then(|proxy| proxy["dialer-proxy"].as_str()),
+            Some(FIRST_HOP_SELECTOR)
+        );
     }
 
     #[test]

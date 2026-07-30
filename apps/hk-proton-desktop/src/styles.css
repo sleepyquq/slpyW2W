@@ -160,7 +160,6 @@ button:focus-visible {
   width: min(100%, 368px);
   min-height: 38px;
   margin: 0 auto 16px;
-  gap: 13px;
 }
 
 .mode-switch {
@@ -210,32 +209,7 @@ button:focus-visible {
   font-weight: 650;
 }
 
-.mode-switch button:disabled,
-.speed-test-button:disabled { cursor: default; opacity: 0.42; }
-
-.speed-test-button {
-  display: grid;
-  flex: 0 0 auto;
-  width: 38px;
-  height: 38px;
-  place-items: center;
-  padding: 0;
-  border: 1px solid rgb(0 0 0 / 6%);
-  border-radius: 11px;
-  color: var(--accent);
-  background: rgb(255 255 255 / 72%);
-  box-shadow: 0 4px 12px rgb(0 0 0 / 5%);
-  cursor: pointer;
-}
-
-.speed-test-button:hover:not(:disabled) { background: #fff; }
-.speed-test-button.is-testing svg { animation: speed-pulse 750ms ease-in-out infinite alternate; }
-.speed-test-button.is-testing:disabled { color: var(--accent); opacity: 1; }
-
-@keyframes speed-pulse {
-  from { opacity: 0.42; transform: scale(0.88); }
-  to { opacity: 1; transform: scale(1.08); }
-}
+.mode-switch button:disabled { cursor: default; opacity: 0.42; }
 
 .config-list {
   position: relative;
@@ -525,16 +499,14 @@ button:focus-visible {
 .is-pyxis-team .ripple-layer i { inset: 30px; }
 
 .team-node-bar {
-  display: flex;
-  align-items: center;
+  display: block;
   width: min(100%, 418px);
   min-height: 54px;
   margin: 4px auto 0;
-  gap: 14px;
 }
 
 .team-node-bar .node-selector {
-  flex: 1 1 auto;
+  width: 100%;
   min-height: 50px;
 }
 
@@ -558,12 +530,6 @@ button:focus-visible {
 .node-selector.is-team .node-selector-trigger > span:first-child {
   font-size: 16px;
   font-weight: 560;
-}
-
-.team-node-bar .speed-test-button {
-  width: 44px;
-  height: 44px;
-  border-radius: 13px;
 }
 
 .is-pyxis-team .feedback {
@@ -712,7 +678,6 @@ button:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: 0.01ms !important; }
   .ripple-layer i,
-  .speed-test-button.is-testing svg,
   .selected-delay.is-testing,
   .node-delay.is-testing,
   .route-line span,

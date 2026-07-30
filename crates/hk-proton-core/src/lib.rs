@@ -11,6 +11,7 @@ mod mihomo;
 mod model;
 mod secret;
 mod validation;
+mod vless;
 mod wireguard;
 
 pub use error::{ConfigError, Result};
@@ -20,9 +21,11 @@ pub use mihomo::{
 };
 pub use model::{
     Endpoint, EndpointHost, FirstHopProfile, HK_PROTON_TUN_DEVICE, ImportMetadata, LanPolicy,
-    OperatingMode, ProbeResult, ProfileId, ProtonProfile, RuntimeOptions, RuntimeSelection,
-    TailscalePolicy, WireGuardConfig, WireGuardInterface, WireGuardPeer,
+    OperatingMode, ProbeResult, ProfileId, ProtonProfile, ProxyConfig, RuntimeOptions,
+    RuntimeSelection, TailscalePolicy, VlessConfig, VlessNetwork, WireGuardConfig,
+    WireGuardInterface, WireGuardPeer,
 };
 pub use secret::SecretValue;
 pub use validation::{ValidationReport, validate_rendered_profile};
+pub use vless::{ParsedVless, looks_like_vless_source, parse_vless};
 pub use wireguard::{ImportWarning, ParsedWireGuard, parse_wireguard};

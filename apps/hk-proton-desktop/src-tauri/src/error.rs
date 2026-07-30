@@ -20,6 +20,10 @@ pub enum ServiceError {
     InvalidFirstHopLayout,
     #[error("WireGuard 配置无效")]
     InvalidWireGuard,
+    #[error("线路服务器域名解析失败")]
+    EndpointResolutionFailed,
+    #[error("配置文件无效或包含不支持的代理类型")]
+    InvalidConfiguration,
     #[error("当前选择无效")]
     InvalidSelection,
     #[error("尚未导入配置")]
@@ -72,6 +76,14 @@ impl From<ServiceError> for CommandErrorDto {
             ServiceError::InvalidWireGuard => Self {
                 code: "invalid-wireguard",
                 message: "至少一个 WireGuard 配置无效，未保存任何更改。",
+            },
+            ServiceError::EndpointResolutionFailed => Self {
+                code: "endpoint-resolution-failed",
+                message: "成员配置已找到，但线路服务器域名当前无法解析，请检查本机 DNS。",
+            },
+            ServiceError::InvalidConfiguration => Self {
+                code: "invalid-configuration",
+                message: "至少一个配置文件无效或包含当前不支持的代理类型，未保存任何更改。",
             },
             ServiceError::InvalidSelection => Self {
                 code: "invalid-selection",

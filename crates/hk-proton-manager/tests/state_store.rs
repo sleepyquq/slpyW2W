@@ -7,8 +7,8 @@ use hk_proton_core::{
 };
 use hk_proton_manager::{
     AppState, GenerationCandidate, LanPolicyRecord, LaunchBlockReason, ManagerError, PendingSecret,
-    ProfileResourceRecord, ProfileRole, ProfileVersionRecord, Result, SecretProtector,
-    SecretPurpose, SecretRef, StateStore, TailscalePolicyRecord,
+    ProfileResourceRecord, ProfileRole, ProfileVersionKind, ProfileVersionRecord, Result,
+    SecretProtector, SecretPurpose, SecretRef, StateStore, TailscalePolicyRecord,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -17,6 +17,7 @@ use time::macros::datetime;
 const FIRST_HOP: &str =
     include_str!("../../hk-proton-core/tests/fixtures/first-hop-hk.synthetic.conf");
 const PROTON: &str = include_str!("../../hk-proton-core/tests/fixtures/proton-jp.synthetic.conf");
+const VLESS_URI: &str = "vless://33333333-3333-4333-8333-333333333333@203.0.113.45:443?encryption=none&security=tls&sni=example.com&type=tcp#synthetic";
 
 #[test]
 fn commits_encrypted_generations_and_rolls_back_the_whole_state() {
@@ -306,6 +307,40 @@ fn state_rejects_a_disabled_current_selection() {
     ));
 }
 
+#[test]
+fn state_stores_vless_uuid_as_a_separate_secret_and_validates_the_version() {
+    let parsed = hk_proton_core::parse_vless(VLESS_URI).unwrap();
+    let (version, pending) =
+        ProfileVersionRecord::from_vless(parsed.config, metadata(1, parsed.source_sha256));
+    assert_eq!(version.kind, ProfileVersionKind::Vless);
+    assert_eq!(
+        version.uuid.as_ref().map(|reference| reference.purpose),
+        Some(SecretPurpose::VlessUuid)
+    );
+    assert_eq!(pending.len(), 1);
+
+    let id = ProfileId::new("fh-vless").unwrap();
+    let state = AppState {
+        schema_version: 1,
+        revision: 0,
+        mode: OperatingMode::SingleHop,
+        selected_first_hop: id.clone(),
+        selected_proton: None,
+        first_hops: vec![ProfileResourceRecord {
+            id,
+            role: ProfileRole::FirstHop,
+            display_name: "VLESS 第一跳".to_owned(),
+            enabled: true,
+            current_version_id: version.version_id,
+            versions: vec![version],
+        }],
+        proton_nodes: Vec::new(),
+        lan: LanPolicyRecord::default(),
+        tailscale: TailscalePolicyRecord::default(),
+    };
+    state.validate().unwrap();
+}
+
 fn initial_state() -> (AppState, Vec<PendingSecret>) {
     let first_hop = parse_wireguard(FIRST_HOP).unwrap();
     let proton = parse_wireguard(PROTON).unwrap();
@@ -501,8 +536,9 @@ fn test_tag(reference: &SecretRef, plaintext: &[u8]) -> [u8; 32] {
     let purpose = match reference.purpose {
         SecretPurpose::WireGuardPrivateKey => 1,
         SecretPurpose::WireGuardPresharedKey => 2,
-        SecretPurpose::RuntimeProfile => 3,
-        SecretPurpose::ManifestHmac => 4,
+        SecretPurpose::VlessUuid => 3,
+        SecretPurpose::RuntimeProfile => 4,
+        SecretPurpose::ManifestHmac => 5,
     };
     let mut hasher = Sha256::new();
     hasher.update(reference.id.as_bytes());

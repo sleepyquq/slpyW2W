@@ -94,24 +94,45 @@ fn validate_general(profile: &RuntimeProjection) -> Result<()> {
     }
 
     for proxy in &profile.proxies {
-        if proxy.kind != "wireguard" || proxy.peers.len() != 1 {
-            return invalid("运行时只允许完整单 Peer WireGuard 节点");
-        }
-        if proxy.top_level_pre_shared_key.is_some() {
-            return invalid("pre-shared-key 必须位于 peers 内");
-        }
-        if proxy.ip_version.as_deref() != Some("ipv4") {
-            return invalid("第一阶段 WireGuard 节点必须固定使用 IPv4 Endpoint");
-        }
-        if !proxy.remote_dns_resolve || proxy.dns.is_empty() {
-            return invalid("WireGuard 节点缺少导入 DNS 或远端解析约束");
-        }
-        if proxy.mtu.is_none_or(|mtu| !(576..=9000).contains(&mtu)) {
-            return invalid("WireGuard 节点缺少有效 MTU");
-        }
-        let peer = &proxy.peers[0];
-        if peer.port == 0 || peer.allowed_ips.is_empty() || peer.server.parse::<IpAddr>().is_err() {
-            return invalid("WireGuard Peer 字段不完整");
+        match proxy.kind.as_str() {
+            "wireguard" => {
+                if proxy.peers.len() != 1 || proxy._private_key.is_none() {
+                    return invalid("运行时只允许完整单 Peer WireGuard 节点");
+                }
+                if proxy.top_level_pre_shared_key.is_some() {
+                    return invalid("pre-shared-key 必须位于 peers 内");
+                }
+                if proxy.ip_version.as_deref() != Some("ipv4") {
+                    return invalid("第一阶段 WireGuard 节点必须固定使用 IPv4 Endpoint");
+                }
+                if !proxy.remote_dns_resolve || proxy.dns.is_empty() {
+                    return invalid("WireGuard 节点缺少导入 DNS 或远端解析约束");
+                }
+                if proxy.mtu.is_none_or(|mtu| !(576..=9000).contains(&mtu)) {
+                    return invalid("WireGuard 节点缺少有效 MTU");
+                }
+                let peer = &proxy.peers[0];
+                if peer.port == 0
+                    || peer.allowed_ips.is_empty()
+                    || peer.server.parse::<IpAddr>().is_err()
+                {
+                    return invalid("WireGuard Peer 字段不完整");
+                }
+            }
+            "vless" => {
+                if !proxy.peers.is_empty()
+                    || proxy.server.as_deref().is_none_or(|server| {
+                        server.parse::<IpAddr>().is_err()
+                            || server.parse::<IpAddr>().is_ok_and(|ip| !ip.is_ipv4())
+                    })
+                    || proxy.port.is_none_or(|port| port == 0)
+                    || proxy.uuid.is_none()
+                    || proxy.network.as_deref() != Some("tcp")
+                {
+                    return invalid("VLESS 节点字段不完整或未固定为 TCP");
+                }
+            }
+            _ => return invalid("运行时包含未支持的代理类型"),
         }
     }
     Ok(())
@@ -277,9 +298,13 @@ fn validate_routes(profile: &RuntimeProjection) -> Result<()> {
         .proxies
         .iter()
         .find(|proxy| &proxy.name == first_hop_name)
-        .and_then(|proxy| proxy.peers.first())
+        .and_then(|proxy| {
+            proxy
+                .server
+                .as_deref()
+                .or_else(|| proxy.peers.first().map(|peer| peer.server.as_str()))
+        })
         .ok_or_else(|| ConfigError::RuntimeValidation("第一跳引用无效".to_owned()))?
-        .server
         .parse::<IpAddr>()
         .map_err(|_| ConfigError::RuntimeValidation("第一跳 Endpoint 无效".to_owned()))?;
     let endpoint_exclusion = match first_hop_endpoint {
@@ -420,8 +445,17 @@ struct ProxyProjection {
     name: String,
     #[serde(rename = "type")]
     kind: String,
-    #[serde(rename = "private-key")]
-    _private_key: IgnoredAny,
+    #[serde(default, rename = "private-key")]
+    _private_key: Option<IgnoredAny>,
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    uuid: Option<IgnoredAny>,
+    #[serde(default)]
+    network: Option<String>,
+    #[serde(default)]
     peers: Vec<PeerProjection>,
     #[serde(default)]
     dialer_proxy: Option<String>,

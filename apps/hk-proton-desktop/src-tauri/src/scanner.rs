@@ -52,11 +52,12 @@ pub struct ScannedSource {
 #[cfg(feature = "pyxis")]
 pub fn scan_embedded_pyxis_profiles(member: &str) -> ServiceResult<Vec<ScannedSource>> {
     let expected_count = match member {
-        "cheyuxuan" | "yanggengbo" | "zuoanna" => 7,
-        "zhenjiabao" => 19,
+        "cheyuxuan" | "yanggengbo" | "zuoanna" => 8,
+        "zhenjiabao" => 20,
+        "zhouwantong" => 7,
         _ => return Err(ServiceError::InvalidSelection),
     };
-    if EMBEDDED_PYXIS_PROFILES.len() != 40 {
+    if EMBEDDED_PYXIS_PROFILES.len() != 51 {
         return Err(ServiceError::SourceLimitExceeded);
     }
     let mut first_hop_count = 0_usize;
@@ -66,8 +67,8 @@ pub fn scan_embedded_pyxis_profiles(member: &str) -> ServiceResult<Vec<ScannedSo
         .iter()
         .filter(|profile| profile.member == member)
     {
-        let source =
-            std::str::from_utf8(profile.contents).map_err(|_| ServiceError::InvalidWireGuard)?;
+        let source = std::str::from_utf8(profile.contents)
+            .map_err(|_| ServiceError::InvalidConfiguration)?;
         let mut hasher = Sha256::new();
         hasher.update(b"slpyW2W-pyxis\0embedded-profile-v1\0");
         hasher.update(match profile.role {
@@ -88,7 +89,7 @@ pub fn scan_embedded_pyxis_profiles(member: &str) -> ServiceResult<Vec<ScannedSo
             SourceRole::Proton => format!("proton-{suffix}"),
         };
         if !ids.insert(id.clone()) {
-            return Err(ServiceError::InvalidWireGuard);
+            return Err(ServiceError::InvalidConfiguration);
         }
         scanned.push(ScannedSource {
             role: profile.role,
@@ -97,7 +98,7 @@ pub fn scan_embedded_pyxis_profiles(member: &str) -> ServiceResult<Vec<ScannedSo
             contents: Zeroizing::new(source.to_owned()),
         });
     }
-    if first_hop_count != 1 {
+    if first_hop_count == 0 {
         return Err(ServiceError::MissingFirstHop);
     }
     if scanned.len() != expected_count {
@@ -127,9 +128,13 @@ pub fn scan_selected_files(
         if !path
             .extension()
             .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("conf"))
+        .is_some_and(|value| {
+            ["conf", "txt", "yaml", "yml"]
+                .iter()
+                .any(|extension| value.eq_ignore_ascii_case(extension))
+        })
         {
-            return Err(ServiceError::InvalidWireGuard);
+            return Err(ServiceError::InvalidConfiguration);
         }
         if metadata.len() > MAX_CONFIG_BYTES {
             return Err(ServiceError::SourceLimitExceeded);

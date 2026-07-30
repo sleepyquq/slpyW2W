@@ -39,8 +39,8 @@ pub use process::{
 };
 pub use state::{
     AppState, EndpointRecord, GenerationCandidate, LanPolicyRecord, PendingSecret,
-    ProfileResourceRecord, ProfileRole, ProfileVersionRecord, SecretPurpose, SecretRef,
-    TailscalePolicyRecord,
+    ProfileResourceRecord, ProfileRole, ProfileVersionKind, ProfileVersionRecord, SecretPurpose,
+    SecretRef, TailscalePolicyRecord,
 };
 pub use store::{CommitReceipt, GenerationManifest, SecretProtector, StateStore, StoredGeneration};
 #[cfg(windows)]

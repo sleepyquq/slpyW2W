@@ -25,6 +25,9 @@ npm-debug.log*
 *.key
 *.migration.zip
 
+# Pyxis 发布所需的本地真实配置（可能包含 VLESS UUID 或 WireGuard 密钥）
+/pyxis-vpn-conf/
+
 # 本地工具与内核二进制
 /tools/
 *.exe

@@ -40,7 +40,7 @@ export function useAppController() {
   const statusRef = useRef(INITIAL_STATUS);
   const revisionRef = useRef(INITIAL_STATUS.revision);
   const operationActiveRef = useRef(false);
-  const speedTestActiveRef = useRef(false);
+  const delayMeasurementActiveRef = useRef(false);
   const pollActiveRef = useRef(false);
   const mountedRef = useRef(true);
 
@@ -118,11 +118,11 @@ export function useAppController() {
         if (PYXIS_BUILD && pyxisMember) {
           try {
             rawStatus = await activatePyxisMember(pyxisMember);
-          } catch {
+          } catch (error) {
             window.localStorage.removeItem(MEMBER_STORAGE_KEY);
             setPyxisMember("");
             setMemberRequired(true);
-            setMemberError("没有找到对应的团队配置，请检查名字。");
+            setMemberError(toUserMessage(error, "成员配置加载失败，请检查成员名、本机网络或 DNS。"));
             rawStatus = await getAppStatus();
           }
         } else {
@@ -150,7 +150,7 @@ export function useAppController() {
         cancelled ||
         document.visibilityState === "hidden" ||
         operationActiveRef.current ||
-        speedTestActiveRef.current ||
+        delayMeasurementActiveRef.current ||
         pollActiveRef.current
       ) {
         return;
@@ -197,8 +197,8 @@ export function useAppController() {
       setMemberRequired(false);
       setDelays({});
       return true;
-    } catch {
-      setMemberError("没有找到对应的团队配置，请检查名字。");
+    } catch (error) {
+      setMemberError(toUserMessage(error, "成员配置加载失败，请检查成员名、本机网络或 DNS。"));
       return false;
     } finally {
       operationActiveRef.current = false;
@@ -254,17 +254,66 @@ export function useAppController() {
     [perform],
   );
 
+  const measureConnectedNode = useCallback(async () => {
+    if (delayMeasurementActiveRef.current) return false;
+    const current = statusRef.current;
+    const targetIds = [
+      current.selectedFirstHop,
+      current.mode === "double" ? current.selectedProton : null,
+    ].filter(Boolean);
+    if (targetIds.length === 0) return false;
+
+    delayMeasurementActiveRef.current = true;
+    setTestingDelayIds(targetIds);
+    try {
+      const report = await measureNodeDelays();
+      const next = Object.fromEntries(targetIds.map((id) => [id, null]));
+      for (const item of Array.isArray(report?.results) ? report.results : []) {
+        if (!item || typeof item.id !== "string") continue;
+        next[item.id] = Number.isFinite(item.delayMs)
+          ? Math.max(1, Math.round(item.delayMs))
+          : null;
+      }
+      const timeoutCount = Object.values(next).filter((value) => value === null).length;
+      if (mountedRef.current) {
+        setDelays((previous) => ({ ...previous, ...next }));
+        setFeedback({
+          kind: timeoutCount > 0 ? "warning" : "success",
+          message: timeoutCount > 0
+            ? `已连接，但当前节点测速超时。`
+            : "已连接，当前节点延迟已更新。",
+        });
+      }
+      return true;
+    } catch (error) {
+      if (mountedRef.current) {
+        setFeedback({
+          kind: "warning",
+          message: `已连接，但节点测速失败：${toUserMessage(error, "请稍后重试。")}`,
+        });
+      }
+      return false;
+    } finally {
+      delayMeasurementActiveRef.current = false;
+      if (mountedRef.current) setTestingDelayIds([]);
+    }
+  }, []);
+
   const connect = useCallback(
     () =>
       perform({
         action: "connect",
         task: async () => {
           await validateCurrent();
-          return connectApp();
+          const result = await connectApp();
+          if (["connected", "running", "manual-verification-required"].includes(result?.runtimeState)) {
+            await measureConnectedNode();
+          }
+          return result;
         },
         fallbackMessage: "连接失败，请检查配置后重试。",
       }),
-    [perform],
+    [measureConnectedNode, perform],
   );
 
   const disconnect = useCallback(
@@ -302,47 +351,6 @@ export function useAppController() {
     [perform],
   );
 
-  const testDelays = useCallback(async () => {
-    if (operationActiveRef.current || speedTestActiveRef.current) return false;
-    const current = statusRef.current;
-    const targets = PYXIS_BUILD || current.mode === "double"
-      ? [...current.firstHops, ...current.protonNodes]
-      : current.firstHops;
-    speedTestActiveRef.current = true;
-    setTestingDelayIds(targets.filter((item) => item.enabled).map((item) => item.id));
-    setFeedback(null);
-    setPollError(null);
-    try {
-      const report = await measureNodeDelays();
-      const next = Object.fromEntries(targets.map((item) => [item.id, null]));
-      for (const item of Array.isArray(report?.results) ? report.results : []) {
-        if (!item || typeof item.id !== "string") continue;
-        next[item.id] = Number.isFinite(item.delayMs)
-          ? Math.max(1, Math.round(item.delayMs))
-          : null;
-      }
-      const timeoutCount = Object.values(next).filter((value) => value === null).length;
-      if (mountedRef.current) {
-        setDelays(next);
-        setFeedback({
-          kind: timeoutCount > 0 ? "warning" : "success",
-          message: timeoutCount > 0
-            ? `测速完成，${timeoutCount} 个节点超时。`
-            : "节点延迟已更新。",
-        });
-      }
-      return true;
-    } catch (error) {
-      if (mountedRef.current) {
-        setFeedback({ kind: "error", message: toUserMessage(error, "测速失败，请稍后重试。") });
-      }
-      return false;
-    } finally {
-      speedTestActiveRef.current = false;
-      if (mountedRef.current) setTestingDelayIds([]);
-    }
-  }, []);
-
   return {
     status,
     loading,
@@ -361,7 +369,6 @@ export function useAppController() {
     importConfigs,
     deleteProfile,
     switchMode,
-    testDelays,
     connect,
     disconnect,
     clearFeedback: () => setFeedback(null),
