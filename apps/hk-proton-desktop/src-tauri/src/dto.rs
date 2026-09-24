@@ -81,6 +81,13 @@ pub struct AppStatusDto {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MemberPackageImportDto {
+    pub member_id: String,
+    pub status: AppStatusDto,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeDelayDto {
     pub id: String,
     pub delay_ms: Option<u32>,

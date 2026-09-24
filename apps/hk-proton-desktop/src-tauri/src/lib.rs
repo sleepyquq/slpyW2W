@@ -87,7 +87,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_status,
-            commands::activate_pyxis_member,
+            commands::import_pyxis_package,
             commands::import_config_files,
             commands::delete_profile,
             commands::update_selection,

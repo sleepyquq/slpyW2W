@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use crate::{
-    dto::{AppStatusDto, CommandErrorDto, NodeDelayReportDto, UiMode, UiProfileRole},
+    dto::{
+        AppStatusDto, CommandErrorDto, MemberPackageImportDto, NodeDelayReportDto, UiMode,
+        UiProfileRole,
+    },
     error::{ServiceError, ServiceResult},
     service::DesktopService,
 };
@@ -38,20 +41,18 @@ pub async fn get_app_status(service: State<'_, SharedDesktopService>) -> Command
 }
 
 #[tauri::command]
-pub async fn activate_pyxis_member(
-    member: String,
+pub async fn import_pyxis_package(
+    path: std::path::PathBuf,
     service: State<'_, SharedDesktopService>,
-) -> CommandResult {
+) -> Result<MemberPackageImportDto, CommandErrorDto> {
     #[cfg(feature = "pyxis")]
     {
-        return run_service_command(service, move |service| {
-            service.activate_pyxis_member(member)
-        })
-        .await;
+        return run_service_command(service, move |service| service.import_pyxis_package(path))
+            .await;
     }
     #[cfg(not(feature = "pyxis"))]
     {
-        let _ = (member, service);
+        let _ = (path, service);
         Err(CommandErrorDto::from(ServiceError::InvalidSelection))
     }
 }

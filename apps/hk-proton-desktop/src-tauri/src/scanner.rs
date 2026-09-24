@@ -1,10 +1,12 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File, Metadata, OpenOptions},
-    io::{Read, Take},
+    io::Read,
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "pyxis")]
+use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -22,23 +24,18 @@ const MAX_DIRECTORY_ENTRIES: usize = 2_048;
 const MAX_CONFIG_FILES: usize = 128;
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 const MAX_TOTAL_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+#[cfg(feature = "pyxis")]
+const MAX_MEMBER_PACKAGE_BYTES: u64 = 16 * 1024 * 1024;
+#[cfg(feature = "pyxis")]
+const MEMBER_PACKAGE_FORMAT: &str = "hk-proton-member-package";
+#[cfg(feature = "pyxis")]
+const MEMBER_PACKAGE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceRole {
     FirstHop,
     Proton,
 }
-
-#[cfg(feature = "pyxis")]
-struct EmbeddedPyxisProfile {
-    member: &'static str,
-    role: SourceRole,
-    display_name: &'static str,
-    contents: &'static [u8],
-}
-
-#[cfg(feature = "pyxis")]
-include!(concat!(env!("OUT_DIR"), "/pyxis_profiles.rs"));
 
 pub struct ScannedSource {
     pub role: SourceRole,
@@ -47,64 +44,192 @@ pub struct ScannedSource {
     pub contents: Zeroizing<String>,
 }
 
-/// 只读取当前成员有权使用的 pyxis 内置配置。这里只把静态字节复制进 Zeroizing 缓冲区，
-/// 后续仍走与手动导入相同的严格解析、候选验证和原子提交链路。
 #[cfg(feature = "pyxis")]
-pub fn scan_embedded_pyxis_profiles(member: &str) -> ServiceResult<Vec<ScannedSource>> {
-    let expected_count = match member {
-        "cheyuxuan" | "yanggengbo" | "zuoanna" => 8,
-        "zhenjiabao" => 20,
-        "zhouwantong" => 7,
-        _ => return Err(ServiceError::InvalidSelection),
-    };
-    if EMBEDDED_PYXIS_PROFILES.len() != 51 {
-        return Err(ServiceError::SourceLimitExceeded);
-    }
-    let mut first_hop_count = 0_usize;
-    let mut ids = BTreeSet::new();
-    let mut scanned = Vec::with_capacity(expected_count);
-    for profile in EMBEDDED_PYXIS_PROFILES
-        .iter()
-        .filter(|profile| profile.member == member)
+pub struct ScannedMemberPackage {
+    pub member_id: String,
+    pub profiles: Vec<ScannedSource>,
+}
+
+/// 包内的原始配置同样按 secret 处理，离开解析流程后清零。
+#[cfg(feature = "pyxis")]
+struct PackageSecret(Zeroizing<String>);
+
+#[cfg(feature = "pyxis")]
+impl<'de> Deserialize<'de> for PackageSecret {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
     {
-        let source = std::str::from_utf8(profile.contents)
-            .map_err(|_| ServiceError::InvalidConfiguration)?;
+        String::deserialize(deserializer).map(|value| Self(Zeroizing::new(value)))
+    }
+}
+
+#[cfg(feature = "pyxis")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct MemberPackage {
+    format: String,
+    schema_version: u32,
+    package_version: String,
+    member_id: String,
+    sections: MemberPackageSections,
+}
+
+#[cfg(feature = "pyxis")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct MemberPackageSections {
+    first_hop_and_relay: Vec<MemberPackageProfile>,
+    first_hop_direct_only: Vec<MemberPackageProfile>,
+    second_hop: Vec<MemberPackageProfile>,
+}
+
+#[cfg(feature = "pyxis")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct MemberPackageProfile {
+    display_name: String,
+    contents: PackageSecret,
+}
+
+/// 读取单成员导入包；这里只返回内存中的来源，提交仍由 service 在完整验证后统一完成。
+#[cfg(feature = "pyxis")]
+pub fn scan_member_package(path: &Path) -> ServiceResult<ScannedMemberPackage> {
+    if !path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("hkproton"))
+    {
+        return Err(ServiceError::InvalidMemberPackage);
+    }
+    let bytes = read_bounded_file(path, MAX_MEMBER_PACKAGE_BYTES).map_err(|error| match error {
+        ServiceError::SourceUnavailable => ServiceError::MemberPackageUnavailable,
+        ServiceError::SourceLimitExceeded => ServiceError::MemberPackageTooLarge,
+        ServiceError::UnsafeSourceTree => ServiceError::UnsafeSourceTree,
+        _ => ServiceError::InvalidMemberPackage,
+    })?;
+    let package: MemberPackage =
+        serde_json::from_slice(bytes.as_slice()).map_err(|_| ServiceError::InvalidMemberPackage)?;
+    if package.format != MEMBER_PACKAGE_FORMAT
+        || package.schema_version != MEMBER_PACKAGE_SCHEMA_VERSION
+        || !valid_package_version(&package.package_version)
+        || !valid_member_id(&package.member_id)
+    {
+        return Err(ServiceError::InvalidMemberPackage);
+    }
+
+    let profile_count = package.sections.first_hop_and_relay.len()
+        + package.sections.first_hop_direct_only.len()
+        + package.sections.second_hop.len();
+    if package.sections.first_hop_and_relay.len() != 1
+        || package.sections.first_hop_direct_only.len() > 1
+        || package.sections.second_hop.is_empty()
+    {
+        return Err(ServiceError::InvalidMemberPackage);
+    }
+    if profile_count > MAX_CONFIG_FILES {
+        return Err(ServiceError::MemberPackageTooLarge);
+    }
+
+    let mut package_profiles = Vec::with_capacity(profile_count);
+    package_profiles.extend(
+        package
+            .sections
+            .first_hop_and_relay
+            .into_iter()
+            .map(|profile| (SourceRole::FirstHop, "香港", profile)),
+    );
+    package_profiles.extend(
+        package
+            .sections
+            .first_hop_direct_only
+            .into_iter()
+            .map(|profile| (SourceRole::FirstHop, "香港2", profile)),
+    );
+    package_profiles.extend(
+        package
+            .sections
+            .second_hop
+            .into_iter()
+            .map(|profile| (SourceRole::Proton, "", profile)),
+    );
+
+    let mut total_bytes = 0_u64;
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    let mut profiles = Vec::with_capacity(profile_count);
+    for (role, expected_name, profile) in package_profiles {
+        let contents = profile.contents.0;
+        if contents.is_empty()
+            || contents.len() as u64 > MAX_CONFIG_BYTES
+            || profile.display_name.trim() != profile.display_name
+            || profile.display_name.is_empty()
+            || profile.display_name.chars().count() > 80
+            || profile.display_name.chars().any(char::is_control)
+            || (!expected_name.is_empty() && profile.display_name != expected_name)
+        {
+            return Err(ServiceError::InvalidMemberPackage);
+        }
+        total_bytes = total_bytes
+            .checked_add(contents.len() as u64)
+            .ok_or(ServiceError::MemberPackageTooLarge)?;
+        if total_bytes > MAX_TOTAL_CONFIG_BYTES {
+            return Err(ServiceError::MemberPackageTooLarge);
+        }
         let mut hasher = Sha256::new();
-        hasher.update(b"slpyW2W-pyxis\0embedded-profile-v1\0");
-        hasher.update(match profile.role {
-            SourceRole::FirstHop => {
-                first_hop_count += 1;
-                b"first-hop\0".as_slice()
-            }
+        hasher.update(b"HK-Proton\0member-package-v1\0");
+        hasher.update(match role {
+            SourceRole::FirstHop => b"first-hop\0".as_slice(),
             SourceRole::Proton => b"proton\0".as_slice(),
         });
-        hasher.update(profile.contents);
+        hasher.update(contents.as_bytes());
         let digest = hasher.finalize();
         let suffix = digest[..8]
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let id = match profile.role {
+        let id = match role {
             SourceRole::FirstHop => format!("first-hop-{suffix}"),
             SourceRole::Proton => format!("proton-{suffix}"),
         };
-        if !ids.insert(id.clone()) {
-            return Err(ServiceError::InvalidConfiguration);
+        let role_key = match role {
+            SourceRole::FirstHop => 0_u8,
+            SourceRole::Proton => 1_u8,
+        };
+        if !ids.insert(id.clone()) || !names.insert((role_key, profile.display_name.clone())) {
+            return Err(ServiceError::InvalidMemberPackage);
         }
-        scanned.push(ScannedSource {
-            role: profile.role,
+        profiles.push(ScannedSource {
+            role,
             id,
-            display_name: profile.display_name.to_owned(),
-            contents: Zeroizing::new(source.to_owned()),
+            display_name: profile.display_name,
+            contents,
         });
     }
-    if first_hop_count == 0 {
-        return Err(ServiceError::MissingFirstHop);
-    }
-    if scanned.len() != expected_count {
-        return Err(ServiceError::SourceLimitExceeded);
-    }
-    Ok(scanned)
+    Ok(ScannedMemberPackage {
+        member_id: package.member_id,
+        profiles,
+    })
+}
+
+#[cfg(feature = "pyxis")]
+fn valid_member_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+#[cfg(feature = "pyxis")]
+fn valid_package_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
 }
 
 /// 读取用户在原生文件选择器中明确选中的配置文件。
@@ -128,11 +253,11 @@ pub fn scan_selected_files(
         if !path
             .extension()
             .and_then(|value| value.to_str())
-        .is_some_and(|value| {
-            ["conf", "txt", "yaml", "yml"]
-                .iter()
-                .any(|extension| value.eq_ignore_ascii_case(extension))
-        })
+            .is_some_and(|value| {
+                ["conf", "txt", "yaml", "yml"]
+                    .iter()
+                    .any(|extension| value.eq_ignore_ascii_case(extension))
+            })
         {
             return Err(ServiceError::InvalidConfiguration);
         }
@@ -368,6 +493,13 @@ fn normalized_relative(relative: &Path) -> String {
 }
 
 fn read_bounded_config(path: &Path) -> ServiceResult<Zeroizing<String>> {
+    let bytes = read_bounded_file(path, MAX_CONFIG_BYTES)?;
+    let source =
+        std::str::from_utf8(bytes.as_slice()).map_err(|_| ServiceError::InvalidWireGuard)?;
+    Ok(Zeroizing::new(source.to_owned()))
+}
+
+fn read_bounded_file(path: &Path, limit: u64) -> ServiceResult<Zeroizing<Vec<u8>>> {
     let file = open_without_following_reparse(path)?;
     let metadata = file
         .metadata()
@@ -375,25 +507,18 @@ fn read_bounded_config(path: &Path) -> ServiceResult<Zeroizing<String>> {
     if !metadata.is_file() || is_link_or_reparse(&metadata) {
         return Err(ServiceError::UnsafeSourceTree);
     }
-    if metadata.len() > MAX_CONFIG_BYTES {
+    if metadata.len() > limit {
         return Err(ServiceError::SourceLimitExceeded);
     }
 
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    bounded_reader(file)
+    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    file.take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ServiceError::SourceUnavailable)?;
-    let bytes = Zeroizing::new(bytes);
-    if bytes.len() > MAX_CONFIG_BYTES as usize {
+    if bytes.len() as u64 > limit {
         return Err(ServiceError::SourceLimitExceeded);
     }
-    let source =
-        std::str::from_utf8(bytes.as_slice()).map_err(|_| ServiceError::InvalidWireGuard)?;
-    Ok(Zeroizing::new(source.to_owned()))
-}
-
-fn bounded_reader(file: File) -> Take<File> {
-    file.take(MAX_CONFIG_BYTES + 1)
+    Ok(bytes)
 }
 
 fn open_without_following_reparse(path: &Path) -> ServiceResult<File> {

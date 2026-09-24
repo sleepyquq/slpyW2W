@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   connectApp,
-  activatePyxisMember,
   disconnectApp,
   getAppStatus,
   importConfigFiles,
+  importPyxisPackage,
   deleteConfig,
   isDesktopRuntime,
   isStatusPayload,
@@ -18,11 +18,12 @@ import {
 
 const INITIAL_STATUS = normalizeAppStatus(null);
 const PYXIS_BUILD = import.meta.env.VITE_PYXIS_BUILD === "true";
-const MEMBER_STORAGE_KEY = "slpyw2w.pyxis.member.v1";
+const MEMBER_STORAGE_KEY = "slpyw2w.pyxis.member-package.v3";
 
 function storedPyxisMember() {
   if (!PYXIS_BUILD || typeof window === "undefined") return "";
-  return window.localStorage.getItem(MEMBER_STORAGE_KEY)?.trim().toLowerCase() ?? "";
+  const member = window.localStorage.getItem(MEMBER_STORAGE_KEY)?.trim().toLowerCase() ?? "";
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(member) ? member : "";
 }
 
 export function useAppController() {
@@ -114,19 +115,11 @@ export function useAppController() {
 
     const load = async () => {
       try {
-        let rawStatus;
-        if (PYXIS_BUILD && pyxisMember) {
-          try {
-            rawStatus = await activatePyxisMember(pyxisMember);
-          } catch (error) {
-            window.localStorage.removeItem(MEMBER_STORAGE_KEY);
-            setPyxisMember("");
-            setMemberRequired(true);
-            setMemberError(toUserMessage(error, "成员配置加载失败，请检查成员名、本机网络或 DNS。"));
-            rawStatus = await getAppStatus();
-          }
-        } else {
-          rawStatus = await getAppStatus();
+        const rawStatus = await getAppStatus();
+        if (PYXIS_BUILD && !rawStatus?.configured) {
+          window.localStorage.removeItem(MEMBER_STORAGE_KEY);
+          setPyxisMember("");
+          setMemberRequired(true);
         }
         if (!cancelled) {
           commitStatus(rawStatus);
@@ -183,22 +176,27 @@ export function useAppController() {
     };
   }, [commitStatus, desktopRuntime]);
 
-  const activateMember = useCallback(async (value) => {
+  const importMemberPackage = useCallback(async () => {
     if (!PYXIS_BUILD || operationActiveRef.current) return false;
-    const member = String(value ?? "").trim().toLowerCase();
     operationActiveRef.current = true;
     setPendingAction("member");
     setMemberError(null);
     try {
-      const result = await activatePyxisMember(member);
-      commitStatus(result);
+      const result = await importPyxisPackage();
+      if (result?.cancelled) return false;
+      const member = String(result?.memberId ?? "").trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(member) || !isStatusPayload(result?.status)) {
+        throw { message: "成员配置包格式不正确。" };
+      }
+      commitStatus(result.status);
       window.localStorage.setItem(MEMBER_STORAGE_KEY, member);
       setPyxisMember(member);
       setMemberRequired(false);
       setDelays({});
+      setFeedback({ kind: "success", message: "成员配置已升级。" });
       return true;
     } catch (error) {
-      setMemberError(toUserMessage(error, "成员配置加载失败，请检查成员名、本机网络或 DNS。"));
+      setMemberError(toUserMessage(error, "成员配置包无效或导入失败，请联系管理员重新获取。"));
       return false;
     } finally {
       operationActiveRef.current = false;
@@ -364,7 +362,7 @@ export function useAppController() {
     pyxisMember,
     memberRequired,
     memberError,
-    activateMember,
+    importMemberPackage,
     updateSelection,
     importConfigs,
     deleteProfile,

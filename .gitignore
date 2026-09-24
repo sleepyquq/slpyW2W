@@ -24,6 +24,7 @@ npm-debug.log*
 *.conf
 *.key
 *.migration.zip
+*.hkproton
 
 # Pyxis 发布所需的本地真实配置（可能包含 VLESS UUID 或 WireGuard 密钥）
 /pyxis-vpn-conf/

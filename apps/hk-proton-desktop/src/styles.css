@@ -541,14 +541,28 @@ button:focus-visible {
   right: 0;
   bottom: 7px;
   left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   color: rgb(110 110 115 / 72%);
   font-size: 11px;
   letter-spacing: 0.02em;
   line-height: 14px;
   text-align: center;
-  pointer-events: none;
   user-select: none;
 }
+
+.pyxis-member-signature button {
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.pyxis-member-signature button:disabled { cursor: default; opacity: 0.45; }
 
 .member-dialog {
   width: 332px;
@@ -583,24 +597,6 @@ button:focus-visible {
   text-align: center;
 }
 
-.member-dialog input {
-  width: 100%;
-  height: 44px;
-  padding: 0 13px;
-  border: 1px solid rgb(0 0 0 / 10%);
-  border-radius: 11px;
-  outline: none;
-  color: var(--text);
-  background: rgb(255 255 255 / 82%);
-  font: inherit;
-  font-size: 14px;
-}
-
-.member-dialog input:focus {
-  border-color: rgb(0 124 136 / 46%);
-  box-shadow: 0 0 0 3px rgb(0 124 136 / 10%);
-}
-
 .member-error {
   min-height: 18px;
   margin-top: 6px;
@@ -612,15 +608,28 @@ button:focus-visible {
 
 .member-error.is-visible { opacity: 1; }
 
+.member-dialog-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.member-dialog-actions.is-optional { grid-template-columns: 1fr 1fr; }
+
 .member-dialog button {
   height: 42px;
-  margin-top: 4px;
   border: 0;
   border-radius: 11px;
   color: #fff;
   background: var(--accent);
   cursor: pointer;
   font-weight: 650;
+}
+
+.member-dialog button.is-secondary {
+  color: var(--text);
+  background: rgb(118 118 128 / 12%);
 }
 
 .member-dialog button:disabled { cursor: default; opacity: 0.42; }

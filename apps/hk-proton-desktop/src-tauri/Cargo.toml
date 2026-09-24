@@ -1,6 +1,6 @@
 [package]
 name = "hk-proton-desktop"
-version = "0.1.3"
+version = "0.1.4"
 description = "slpyW2W Windows desktop shell"
 edition.workspace = true
 license.workspace = true
@@ -21,6 +21,7 @@ test = false
 bench = false
 
 [build-dependencies]
+serde_json.workspace = true
 tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]

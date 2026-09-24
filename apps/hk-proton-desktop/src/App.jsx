@@ -392,39 +392,44 @@ function ConfirmDialog({ title, message, confirmLabel = "确定", destructive = 
   );
 }
 
-function MemberDialog({ busy, error, onSubmit }) {
-  const [value, setValue] = useState("");
+function MemberDialog({ open, required, busy, error, onImport, onClose }) {
   const ref = useRef(null);
 
   useEffect(() => {
-    ref.current?.showModal();
-  }, []);
+    if (open && !ref.current?.open) ref.current?.showModal();
+    if (!open && ref.current?.open) ref.current?.close();
+  }, [open]);
 
   return (
-    <dialog className="member-dialog" ref={ref} onCancel={(event) => event.preventDefault()}>
+    <dialog
+      className="member-dialog"
+      ref={ref}
+      onCancel={(event) => {
+        if (required) event.preventDefault();
+        else onClose();
+      }}
+    >
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (value.trim()) void onSubmit(value);
+          if (!busy) void onImport();
         }}
       >
-        <h2>输入你的名字</h2>
-        <p>使用拼音小写</p>
-        <input
-          autoFocus
-          autoComplete="off"
-          spellCheck="false"
-          value={value}
-          placeholder="例如：zhangsan"
-          disabled={busy}
-          onChange={(event) => setValue(event.target.value.toLowerCase())}
-        />
+        <h2>{required ? "导入个人配置" : "更新个人配置"}</h2>
+        <p>请选择管理员发给你的 .hkproton 文件。</p>
         <span className={`member-error${error ? " is-visible" : ""}`} role="alert">
           {error ?? ""}
         </span>
-        <button type="submit" disabled={busy || !value.trim()}>
-          {busy ? "正在准备" : "继续"}
-        </button>
+        <div className={`member-dialog-actions${required ? "" : " is-optional"}`}>
+          {!required ? (
+            <button className="is-secondary" type="button" disabled={busy} onClick={onClose}>
+              取消
+            </button>
+          ) : null}
+          <button type="submit" disabled={busy}>
+            {busy ? "正在导入" : "选择文件"}
+          </button>
+        </div>
       </form>
     </dialog>
   );
@@ -435,6 +440,7 @@ export function App() {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [requestedMode, setRequestedMode] = useState(null);
   const [requestedTeamNode, setRequestedTeamNode] = useState(null);
+  const [memberPackageDialogOpen, setMemberPackageDialogOpen] = useState(false);
   const view = connectionView(controller.status, controller.pendingAction);
   const active = view.connected || BUSY_STATES.has(controller.status.runtimeState);
   const operationPending = Boolean(controller.pendingAction);
@@ -453,12 +459,15 @@ export function App() {
   const proton = selectedName(controller.status.protonNodes, controller.status.selectedProton);
   const teamProfiles = useMemo(() => {
     const first = [...controller.status.firstHops]
+      .filter((profile) => profile.enabled)
       .map((profile) => ({ ...profile }))
       .sort((left, right) => teamNodeRank(left.name) - teamNodeRank(right.name));
-    const exits = [...controller.status.protonNodes].sort((left, right) =>
+    const exits = [...controller.status.protonNodes]
+      .filter((profile) => profile.enabled)
+      .sort((left, right) =>
       teamNodeRank(left.name) - teamNodeRank(right.name)
         || left.name.localeCompare(right.name, "zh-Hans-CN", { numeric: true }),
-    );
+      );
     return [...first, ...exits];
   }, [controller.status.firstHops, controller.status.protonNodes]);
   const selectedTeamNode = controller.status.mode === "single"
@@ -526,6 +535,12 @@ export function App() {
     if (!profileId) return;
     if (view.connected && !(await controller.disconnect())) return;
     await applyTeamNode(profileId);
+  };
+
+  const importMemberPackage = async () => {
+    if (await controller.importMemberPackage()) {
+      setMemberPackageDialogOpen(false);
+    }
   };
 
   return (
@@ -611,7 +626,14 @@ export function App() {
 
       {PYXIS_BUILD && controller.pyxisMember ? (
         <footer className="pyxis-member-signature">
-          Pyxis - {controller.pyxisMember}
+          <span>Pyxis - {controller.pyxisMember}</span>
+          <button
+            type="button"
+            disabled={controller.loading || active || operationPending || controller.testingDelays}
+            onClick={() => setMemberPackageDialogOpen(true)}
+          >
+            更新配置
+          </button>
         </footer>
       ) : null}
 
@@ -641,11 +663,14 @@ export function App() {
           onConfirm={confirmTeamNodeChange}
         />
       ) : null}
-      {PYXIS_BUILD && controller.memberRequired ? (
+      {PYXIS_BUILD && (controller.memberRequired || memberPackageDialogOpen) ? (
         <MemberDialog
+          open={controller.memberRequired || memberPackageDialogOpen}
+          required={controller.memberRequired}
           busy={controller.pendingAction === "member"}
           error={controller.memberError}
-          onSubmit={controller.activateMember}
+          onImport={importMemberPackage}
+          onClose={() => setMemberPackageDialogOpen(false)}
         />
       ) : null}
     </main>

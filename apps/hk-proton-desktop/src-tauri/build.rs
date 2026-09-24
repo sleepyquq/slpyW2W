@@ -10,8 +10,7 @@ const PYXIS_MEMBERS: [&str; 5] = [
     "zuoanna",
     "zhouwantong",
 ];
-const LEGACY_WIREGUARD_MEMBERS: [&str; 4] =
-    ["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna"];
+const LEGACY_WIREGUARD_MEMBERS: [&str; 4] = ["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna"];
 const EXPECTED_PYXIS_PROFILE_COUNT: usize = 51;
 const VLESS_SOURCE_RELATIVE_DIR: &str = "vless/HK-Xray-VLESS-10设备独立配置";
 
@@ -20,7 +19,7 @@ const PYXIS_VLESS_FILES: [(&str, &str); 5] = [
     ("zhouwantong", "mihomo-device-02-zwt.yaml"),
     ("yanggengbo", "mihomo-device-03-ygb.yaml"),
     ("zuoanna", "mihomo-device-04-zan.yaml"),
-    ("cheyuxuan", "mihomo-device-05-cyx.yaml"),
+    ("cheyuxuan", "mihomo-device-05.yaml"),
 ];
 
 struct PyxisSource {
@@ -32,8 +31,18 @@ struct PyxisSource {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SLPYW2W_PYXIS_CONFIG_ROOT");
+    println!("cargo:rerun-if-env-changed=SLPYW2W_PYXIS_PACKAGE_STAGE");
     if env::var_os("CARGO_FEATURE_PYXIS").is_some() {
-        generate_pyxis_bundle();
+        match (
+            env::var_os("SLPYW2W_PYXIS_CONFIG_ROOT"),
+            env::var_os("SLPYW2W_PYXIS_PACKAGE_STAGE"),
+        ) {
+            (Some(source_root), Some(package_stage)) => {
+                generate_pyxis_bundle(PathBuf::from(source_root), PathBuf::from(package_stage));
+            }
+            (None, None) => {}
+            _ => panic!("pyxis 导入包生成需要同时提供配置来源与暂存目录"),
+        }
     }
 
     if env::var("PROFILE").as_deref() != Ok("release") {
@@ -70,12 +79,9 @@ fn main() {
     tauri_build::try_build(attributes).expect("生成 slpyW2W Tauri 构建资源失败");
 }
 
-/// pyxis 构建只在编译期读取指定的只读来源，并把配置写入 Cargo OUT_DIR。
-/// OUT_DIR 和最终 EXE 都不进入 Git；生成代码本身只记录内部文件路径和显示名。
-fn generate_pyxis_bundle() {
-    let source_root = env::var_os("SLPYW2W_PYXIS_CONFIG_ROOT")
-        .map(PathBuf::from)
-        .expect("pyxis 构建缺少 SLPYW2W_PYXIS_CONFIG_ROOT");
+/// pyxis 打包只在编译期读取指定的只读来源，输出每位成员独立的导入包。
+/// 成员密钥不会编入定制客户端本身。
+fn generate_pyxis_bundle(source_root: PathBuf, package_stage: PathBuf) {
     let source_root = source_root
         .canonicalize()
         .expect("无法定位 pyxis 配置来源目录");
@@ -92,22 +98,21 @@ fn generate_pyxis_bundle() {
             .join(pyxis_vless_file_name(member));
         profiles.push(PyxisSource {
             member: member.to_owned(),
-            role: "SourceRole::FirstHop",
+            role: "first-hop-and-relay",
             display_name: "香港".to_owned(),
             contents: read_safe_source(&source_root, &vless_file),
         });
 
-        // 四位原成员的香港 WireGuard 保留为“香港2”直连节点；它不会被
-        // 前端选作第二跳链路的第一跳，第二跳始终固定使用上面的 VLESS 香港。
+        // 香港2 只作为可选的单跳直连节点；双跳转发固定使用上面的香港 VLESS。
         if LEGACY_WIREGUARD_MEMBERS.contains(&member) {
-            let legacy_first_hop = source_root.join(format!("{member}.conf"));
+            let direct_hong_kong = source_root.join(format!("{member}.conf"));
             profiles.push(PyxisSource {
                 member: member.to_owned(),
-                role: "SourceRole::FirstHop",
+                role: "first-hop-direct-only",
                 display_name: "香港2".to_owned(),
-                contents: read_safe_source(&source_root, &legacy_first_hop),
+                contents: read_safe_source(&source_root, &direct_hong_kong),
             });
-            println!("cargo:rerun-if-changed={}", legacy_first_hop.display());
+            println!("cargo:rerun-if-changed={}", direct_hong_kong.display());
         }
 
         let proton_file = source_root.join(format!("{member}.txt"));
@@ -119,29 +124,71 @@ fn generate_pyxis_bundle() {
     assert_eq!(
         profiles.len(),
         EXPECTED_PYXIS_PROFILE_COUNT,
-        "pyxis 团队构建必须恰好包含四十份成员配置"
+        "pyxis 团队构建必须恰好包含五十一份成员配置"
     );
 
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR 缺失"));
-    let mut generated =
-        String::from("const EMBEDDED_PYXIS_PROFILES: &[EmbeddedPyxisProfile] = &[\n");
-    for (index, profile) in profiles.iter().enumerate() {
-        let embedded_path = out_dir.join(format!("pyxis-profile-{index}.source"));
-        assert!(
-            !profile.contents.is_empty() && profile.contents.len() <= 256 * 1024,
-            "pyxis 配置大小无效"
+    let stage_metadata = fs::symlink_metadata(&package_stage).expect("pyxis 导入包暂存目录不存在");
+    assert!(
+        stage_metadata.is_dir() && !is_reparse(&stage_metadata),
+        "pyxis 导入包暂存目录不安全"
+    );
+    assert!(
+        fs::read_dir(&package_stage)
+            .expect("无法读取 pyxis 导入包暂存目录")
+            .next()
+            .is_none(),
+        "pyxis 导入包暂存目录必须为空"
+    );
+
+    for member in PYXIS_MEMBERS {
+        let section_profiles = |role: &str| {
+            profiles
+                .iter()
+                .filter(|profile| profile.member == member && profile.role == role)
+                .map(|profile| {
+                    assert!(
+                        !profile.contents.is_empty() && profile.contents.len() <= 256 * 1024,
+                        "pyxis 配置大小无效"
+                    );
+                    let contents =
+                        std::str::from_utf8(&profile.contents).expect("pyxis 配置不是 UTF-8");
+                    serde_json::json!({
+                        "displayName": &profile.display_name,
+                        "contents": contents,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let first_hop_and_relay = section_profiles("first-hop-and-relay");
+        let first_hop_direct_only = section_profiles("first-hop-direct-only");
+        let second_hop = section_profiles("second-hop");
+        let member_profile_count =
+            first_hop_and_relay.len() + first_hop_direct_only.len() + second_hop.len();
+        let expected_count = match member {
+            "cheyuxuan" | "yanggengbo" | "zuoanna" => 8,
+            "zhenjiabao" => 20,
+            "zhouwantong" => 7,
+            _ => unreachable!("Pyxis 成员表包含未配置成员"),
+        };
+        assert_eq!(
+            member_profile_count, expected_count,
+            "pyxis 成员配置数量不正确"
         );
-        fs::write(&embedded_path, &profile.contents).expect("无法生成 pyxis 内置配置");
-        generated.push_str(&format!(
-            "    EmbeddedPyxisProfile {{ member: {member:?}, role: {role}, display_name: {display_name:?}, contents: include_bytes!({path:?}) }},\n",
-            member = profile.member,
-            role = profile.role,
-            display_name = profile.display_name,
-            path = embedded_path.to_string_lossy(),
-        ));
+        let package = serde_json::json!({
+            "format": "hk-proton-member-package",
+            "schemaVersion": 3,
+            "packageVersion": env!("CARGO_PKG_VERSION"),
+            "memberId": member,
+            "sections": {
+                "firstHopAndRelay": first_hop_and_relay,
+                "firstHopDirectOnly": first_hop_direct_only,
+                "secondHop": second_hop,
+            },
+        });
+        let path = package_stage.join(format!("{member}.hkproton"));
+        let bytes = serde_json::to_vec_pretty(&package).expect("无法序列化 pyxis 成员导入包");
+        fs::write(path, bytes).expect("无法写入 pyxis 成员导入包");
     }
-    generated.push_str("];\n");
-    fs::write(out_dir.join("pyxis_profiles.rs"), generated).expect("无法生成 pyxis 配置索引");
 }
 
 fn pyxis_vless_file_name(member: &str) -> &'static str {
@@ -183,7 +230,7 @@ fn parse_pyxis_proton_profiles(member: &str, source: &[u8]) -> Vec<PyxisSource> 
         contents.push(b'\n');
         profiles.push(PyxisSource {
             member: member.to_owned(),
-            role: "SourceRole::Proton",
+            role: "second-hop",
             display_name,
             contents,
         });

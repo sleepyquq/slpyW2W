@@ -13,6 +13,15 @@ pub enum ServiceError {
     UnsafeSourceTree,
     #[error("配置目录超过安全扫描上限")]
     SourceLimitExceeded,
+    #[cfg(feature = "pyxis")]
+    #[error("成员配置包无法读取")]
+    MemberPackageUnavailable,
+    #[cfg(feature = "pyxis")]
+    #[error("成员配置包大小超过限制")]
+    MemberPackageTooLarge,
+    #[cfg(feature = "pyxis")]
+    #[error("成员配置包无效或版本不受支持")]
+    InvalidMemberPackage,
     #[error("缺少固定的第一跳配置")]
     MissingFirstHop,
     #[cfg(test)]
@@ -54,15 +63,30 @@ impl From<ServiceError> for CommandErrorDto {
         match value {
             ServiceError::SourceUnavailable => Self {
                 code: "source-unavailable",
-                message: "默认配置目录当前不可读取。",
+                message: "所选配置来源当前不可读取。",
             },
             ServiceError::UnsafeSourceTree => Self {
                 code: "unsafe-source-tree",
-                message: "配置目录包含不受信任的链接，已停止导入。",
+                message: "所选配置来源不安全，已停止导入。",
             },
             ServiceError::SourceLimitExceeded => Self {
                 code: "source-limit-exceeded",
-                message: "配置目录超过安全扫描上限，已停止导入。",
+                message: "配置导入内容超过安全大小限制，已停止导入。",
+            },
+            #[cfg(feature = "pyxis")]
+            ServiceError::MemberPackageUnavailable => Self {
+                code: "member-package-unavailable",
+                message: "成员配置包无法读取，请重新选择文件。",
+            },
+            #[cfg(feature = "pyxis")]
+            ServiceError::MemberPackageTooLarge => Self {
+                code: "member-package-too-large",
+                message: "成员配置包超过安全大小限制。",
+            },
+            #[cfg(feature = "pyxis")]
+            ServiceError::InvalidMemberPackage => Self {
+                code: "invalid-member-package",
+                message: "成员配置包无效或版本不受支持，未保存更改。",
             },
             ServiceError::MissingFirstHop => Self {
                 code: "missing-first-hop",

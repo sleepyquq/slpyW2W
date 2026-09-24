@@ -94,11 +94,18 @@ export async function getAppStatus() {
   return isDesktopRuntime() ? invoke("get_app_status") : cloneStatus(demoStatus);
 }
 
-export async function activatePyxisMember(member) {
-  if (isDesktopRuntime()) return invoke("activate_pyxis_member", { member });
-  const normalized = String(member ?? "").trim().toLowerCase();
-  const allowed = new Set(["cheyuxuan", "yanggengbo", "zhenjiabao", "zuoanna", "zhouwantong"]);
-  if (!allowed.has(normalized)) throw { message: "未找到对应的团队配置。" };
+export async function importPyxisPackage() {
+  if (isDesktopRuntime()) {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "HK-Proton 成员配置包", extensions: ["hkproton"] }],
+    });
+    if (!selected) return { cancelled: true };
+    return invoke("import_pyxis_package", { path: selected });
+  }
+
+  const normalized = "demo";
   const owners = normalized === "zhenjiabao" ? ["C", "Y", "Z"] : [""];
   const protonNodes = owners.flatMap((owner) => [
     ...[1, 2, 3].map((index) => ({
@@ -130,7 +137,7 @@ export async function activatePyxisMember(member) {
     canConnect: true,
     revision: demoStatus.revision + 1,
   };
-  return cloneStatus(demoStatus);
+  return { memberId: normalized, status: cloneStatus(demoStatus) };
 }
 
 export async function pollAppStatus() {

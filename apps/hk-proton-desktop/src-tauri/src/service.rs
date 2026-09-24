@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::{IpAddr, ToSocketAddrs},
     path::PathBuf,
     sync::Arc,
@@ -35,7 +35,7 @@ use crate::{
 };
 
 #[cfg(feature = "pyxis")]
-use crate::scanner::scan_embedded_pyxis_profiles;
+use crate::{dto::MemberPackageImportDto, scanner::scan_member_package};
 
 #[cfg(test)]
 use crate::scanner::scan_config_tree;
@@ -69,8 +69,7 @@ impl AppService<DpapiCurrentUserProtector, crate::live_runtime::LiveRuntime> {
             runtime,
         };
         // 旧版本状态可能仍保存域名 Endpoint，运行合同刷新需要依赖当前 DNS。
-        // 刷新失败不能阻止 GUI 启动；Pyxis 首次输入成员名时会从内置配置
-        // 重新构造完整状态，普通版也可以通过重新导入配置恢复。
+        // 刷新失败不能阻止 GUI 启动；Pyxis 用户可重新导入成员配置包恢复。
         if let Err(error) = service.refresh_runtime_contract_if_needed() {
             eprintln!("启动时刷新旧运行状态失败: {error:?}");
         }
@@ -93,21 +92,21 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
         self.status_with_runtime(runtime)
     }
 
-    /// 首次输入成员名时，只把该成员的 VLESS 香港、可选的香港2 WireGuard，
-    /// 以及对应的第二跳节点写入当前用户的 DPAPI Vault。
+    /// 导入成员升级包，保留旧记录并停用，只启用升级包中的配置。
     #[cfg(feature = "pyxis")]
-    pub fn activate_pyxis_member(&mut self, member: String) -> ServiceResult<AppStatusDto> {
+    pub fn import_pyxis_package(&mut self, path: PathBuf) -> ServiceResult<MemberPackageImportDto> {
         if self.runtime.is_active() {
             return Err(ServiceError::RuntimeActive);
         }
-        let member = member.trim().to_ascii_lowercase();
-        let sources = scan_embedded_pyxis_profiles(&member)?;
-        let mut imports = Vec::with_capacity(sources.len());
-        for source in sources {
+        let package = scan_member_package(&path)?;
+        let member_id = package.member_id;
+        let mut imports = Vec::with_capacity(package.profiles.len());
+        for source in package.profiles {
             let ParsedSource {
                 config,
                 source_sha256,
-            } = parse_source(source.contents.as_str())?;
+            } = parse_source(source.contents.as_str())
+                .map_err(|_| ServiceError::InvalidMemberPackage)?;
             imports.push(ParsedImport {
                 role: source.role,
                 id: source.id,
@@ -116,35 +115,68 @@ impl<P: SecretProtector, R: RuntimeBackend> AppService<P, R> {
                 source_sha256,
             });
         }
+        let hong_kong = imports
+            .iter()
+            .find(|item| item.role == SourceRole::FirstHop && item.display_name == "香港")
+            .ok_or(ServiceError::InvalidMemberPackage)?;
+        if !matches!(&hong_kong.config, ImportedConfig::Vless(_))
+            || !imports.iter().any(|item| item.role == SourceRole::Proton)
+        {
+            return Err(ServiceError::InvalidMemberPackage);
+        }
+        if imports.iter().any(|item| {
+            item.role == SourceRole::FirstHop
+                && item.display_name == "香港2"
+                && !matches!(&item.config, ImportedConfig::WireGuard(_))
+        }) {
+            return Err(ServiceError::InvalidMemberPackage);
+        }
+        let imported_profile_ids = imports
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<BTreeSet<_>>();
+        let hong_kong_id =
+            ProfileId::new(hong_kong.id.clone()).map_err(|_| ServiceError::InvalidMemberPackage)?;
+        let selected_proton_id = imports
+            .iter()
+            .find(|item| item.role == SourceRole::Proton)
+            .map(|item| ProfileId::new(item.id.clone()))
+            .transpose()
+            .map_err(|_| ServiceError::InvalidMemberPackage)?
+            .ok_or(ServiceError::InvalidMemberPackage)?;
 
         let current = self.store.load_current()?;
-        let current_matches = current.as_ref().is_some_and(|generation| {
-            state_matches_embedded(&generation.state, &imports)
-                && (generation.state.mode != OperatingMode::DoubleHop
-                    || generation
-                        .state
-                        .first_hops
-                        .iter()
-                        .find(|item| item.id == generation.state.selected_first_hop)
-                        .is_some_and(|item| item.display_name == "香港"))
-        });
-        if current_matches {
-            return self.get_app_status();
-        }
-
         let expected_revision = current.as_ref().map(|generation| generation.state.revision);
-        let (mut state, pending) = merge_imports(None, imports, OffsetDateTime::now_utc())?;
-        state.mode = OperatingMode::SingleHop;
-        state.selected_first_hop = state
+        let existing = current.map(|generation| {
+            let mut state = generation.state;
+            for profile in state
+                .first_hops
+                .iter_mut()
+                .chain(state.proton_nodes.iter_mut())
+            {
+                profile.enabled = false;
+            }
+            state
+        });
+        let (mut state, pending) = merge_imports(existing, imports, OffsetDateTime::now_utc())
+            .map_err(|_| ServiceError::InvalidMemberPackage)?;
+        for profile in state
             .first_hops
-            .iter()
-            .find(|item| item.enabled && item.display_name == "香港")
-            .map(|item| item.id.clone())
-            .ok_or(ServiceError::MissingFirstHop)?;
+            .iter_mut()
+            .chain(state.proton_nodes.iter_mut())
+        {
+            profile.enabled = imported_profile_ids.contains(profile.id.as_str());
+        }
+        state.mode = OperatingMode::SingleHop;
+        state.selected_first_hop = hong_kong_id;
+        state.selected_proton = Some(selected_proton_id);
         let candidate = self.build_candidate(state, pending)?;
         self.store.commit(candidate, expected_revision)?;
         let runtime = self.runtime.configuration_changed();
-        self.status_with_runtime(runtime)
+        Ok(MemberPackageImportDto {
+            member_id,
+            status: self.status_with_runtime(runtime)?,
+        })
     }
 
     /// 端口或运行合同升级时自动生成新 revision，避免旧 generation 继续占用 Clash 端口。
@@ -630,37 +662,6 @@ struct ParsedSource {
     source_sha256: String,
 }
 
-#[cfg(feature = "pyxis")]
-fn state_matches_embedded(state: &AppState, imports: &[ParsedImport]) -> bool {
-    let expected_first_hops = imports
-        .iter()
-        .filter(|item| item.role == SourceRole::FirstHop)
-        .count();
-    let expected_proton = imports
-        .iter()
-        .filter(|item| item.role == SourceRole::Proton)
-        .count();
-    if state.first_hops.len() != expected_first_hops
-        || state.proton_nodes.len() != expected_proton
-    {
-        return false;
-    }
-
-    imports.iter().all(|item| {
-        let resources = match item.role {
-            SourceRole::FirstHop => &state.first_hops,
-            SourceRole::Proton => &state.proton_nodes,
-        };
-        resources.iter().any(|resource| {
-            resource.id.as_str() == item.id
-                && resource.display_name == item.display_name
-                && resource
-                    .current_version()
-                    .is_some_and(|version| version.source_sha256 == item.source_sha256)
-        })
-    })
-}
-
 fn parse_source(source: &str) -> ServiceResult<ParsedSource> {
     if looks_like_vless_source(source) {
         let parsed = parse_vless(source).map_err(|_| ServiceError::InvalidConfiguration)?;
@@ -1142,46 +1143,6 @@ proxies:
             let value = String::from_utf8(value.to_vec())
                 .map_err(|_| hk_proton_manager::ManagerError::SecretProtection)?;
             Ok(SecretValue::new(value))
-        }
-    }
-
-    #[cfg(feature = "pyxis")]
-    #[test]
-    fn pyxis_embedded_profiles_match_member_and_hop_contract() {
-        let cases = [
-            ("cheyuxuan", 8_usize, 2_usize),
-            ("yanggengbo", 8, 2),
-            ("zhenjiabao", 20, 2),
-            ("zuoanna", 8, 2),
-            ("zhouwantong", 7, 1),
-        ];
-        for (member, expected_total, expected_first_hops) in cases {
-            let sources = scan_embedded_pyxis_profiles(member).unwrap();
-            assert_eq!(sources.len(), expected_total);
-            let first_hops = sources
-                .iter()
-                .filter(|source| source.role == SourceRole::FirstHop)
-                .collect::<Vec<_>>();
-            assert_eq!(first_hops.len(), expected_first_hops);
-            assert_eq!(
-                first_hops
-                    .iter()
-                    .filter(|source| source.display_name == "香港")
-                    .count(),
-                1
-            );
-            for source in sources {
-                match (source.role, source.display_name.as_str()) {
-                    (SourceRole::FirstHop, "香港") => {
-                        assert!(parse_vless(source.contents.as_str()).is_ok());
-                    }
-                    (SourceRole::FirstHop, "香港2")
-                    | (SourceRole::Proton, _) => {
-                        assert!(parse_wireguard(source.contents.as_str()).is_ok());
-                    }
-                    (SourceRole::FirstHop, _) => panic!("未知的 Pyxis 第一跳命名"),
-                }
-            }
         }
     }
 
